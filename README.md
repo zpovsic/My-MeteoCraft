@@ -18,8 +18,8 @@ measurements from the HTML and shows them in a native window. It updates itself 
   today's range or extra detail
 - **Today's statistics:** minimum, maximum and average for each measurement
 - **All-time records:** with the date and time each was set
-- **Images:** the live camera and the station's temperature and pressure graphs
-  (click an image to open it in your browser)
+- **Map and graphs:** a dark map of Koseze, and the station's temperature and pressure
+  graphs (click the map or a graph to open it in your browser)
 - Automatic refresh every 5 minutes, with a status badge (Live, Updating or Offline),
   a countdown and a manual **Refresh** button
 - A dark theme, and a layout that reflows from several columns down to one as the
@@ -66,6 +66,7 @@ in the tests.
 ```text
 apps/
   main.rs      App state, background downloads, auto-refresh and the dashboard layout
+  map.rs       The map of Koseze, stitched from OpenStreetMap tiles and darkened
   station.rs   Downloading and parsing the station page
   theme.rs     Color palette, egui styling and the temperature color scale
   tray.rs      Windows notification-area icon that draws the temperature and its menu
@@ -83,8 +84,11 @@ tests/
 - `station::fetch()` downloads the page with [`ureq`](https://crates.io/crates/ureq), and
   `station::parse()` reads the values with [`scraper`](https://crates.io/crates/scraper).
 - Downloads run on a background thread so the window stays responsive.
-- The camera and graph images are loaded directly from the station's server by
-  `egui_extras` and reloaded whenever new data arrives.
+- The graph images are loaded directly from the station's server by `egui_extras` and
+  reloaded whenever new data arrives.
+- The map is built once from [OpenStreetMap](https://www.openstreetmap.org/copyright)
+  tiles and kept in the system's temp folder for 30 days, as the
+  [tile usage policy](https://operations.osmfoundation.org/policies/tiles/) asks.
 - Labels are parsed in Slovenian, as they appear on the website, and translated for display
   by `english()` in `apps/main.rs`. A label that has no translation is shown in Slovenian,
   and a test fails if any label on the saved page is missing a translation.
@@ -96,6 +100,8 @@ tests/
 The data comes from a private LaCrosse WS2300 station run by enthusiasts. It is not part
 of the official ARSO network and is for information only. All data and images belong to
 the station's operators at [vreme.zajcek.org](https://vreme.zajcek.org/koseze/).
+Map data is © OpenStreetMap contributors, available under the
+[Open Database License](https://www.openstreetmap.org/copyright).
 
 ## License
 

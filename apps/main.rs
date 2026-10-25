@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod map;
 mod station;
 mod theme;
 #[cfg(windows)]
@@ -42,15 +43,30 @@ struct MeteoApp {
     error: Option<String>,
     pending: Option<Receiver<Result<StationData, FetchError>>>,
     last_fetch: Instant,
+    map: Map,
     #[cfg(windows)]
     tray: Option<tray::Tray>,
     /// Set when the user picks Quit, so closing the window really exits.
     quitting: bool,
 }
 
+enum Map {
+    Loading(Receiver<Result<egui::ColorImage, String>>),
+    Ready(egui::TextureHandle),
+    Failed(String),
+}
+
 impl MeteoApp {
     fn new(ctx: egui::Context) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let map_ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(map::load());
+            map_ctx.request_repaint();
+        });
+
         let mut app = Self {
+            map: Map::Loading(rx),
             #[cfg(windows)]
             tray: tray::Tray::new(&ctx)
                 .inspect_err(|e| eprintln!("tray icon unavailable: {e}"))
@@ -137,12 +153,28 @@ impl MeteoApp {
             Ok(data) => {
                 self.data = Some(data);
                 self.error = None;
-                // Live camera and graphs are regenerated on the server alongside the data.
+                // The graphs are regenerated on the server alongside the data.
                 self.ctx.forget_all_images();
             }
             Err(e) => self.error = Some(e.to_string()),
         }
         self.update_tray();
+    }
+
+    fn poll_map(&mut self) {
+        let Map::Loading(rx) = &self.map else { return };
+        self.map = match rx.try_recv() {
+            Ok(Ok(image)) => Map::Ready(self.ctx.load_texture(
+                "koseze-map",
+                image,
+                egui::TextureOptions::LINEAR,
+            )),
+            Ok(Err(e)) => Map::Failed(e),
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                Map::Failed("map thread stopped unexpectedly".into())
+            }
+        };
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
@@ -257,6 +289,7 @@ impl eframe::App for MeteoApp {
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         }
         self.poll_fetch();
+        self.poll_map();
         if self.last_fetch.elapsed() >= REFRESH_INTERVAL {
             self.refresh();
         }
@@ -299,7 +332,7 @@ impl eframe::App for MeteoApp {
                                 if let Some(err) = &self.error {
                                     error_banner(ui, err);
                                 }
-                                dashboard(ui, data);
+                                dashboard(ui, data, &self.map);
                             });
                     });
             });
@@ -348,7 +381,7 @@ fn error_banner(ui: &mut egui::Ui, err: &str) {
     ui.add_space(12.0);
 }
 
-fn dashboard(ui: &mut egui::Ui, data: &StationData) {
+fn dashboard(ui: &mut egui::Ui, data: &StationData, map: &Map) {
     widgets::card_rows(
         ui,
         "overview",
@@ -371,7 +404,7 @@ fn dashboard(ui: &mut egui::Ui, data: &StationData) {
     widgets::card_rows(ui, "records", 0.0, vec![Box::new(|ui| records(ui, data))]);
 
     let images: Vec<CardFn> = vec![
-        Box::new(|ui| image_card(ui, "📷", "Live camera · facing SW", "livefeed/live.jpg")),
+        Box::new(|ui| map_card(ui, map)),
         Box::new(|ui| image_card(ui, "📈", "Temperature and wind chill", "graf.png")),
         Box::new(|ui| image_card(ui, "📉", "Air pressure", "graf_tlak.png")),
     ];
@@ -592,6 +625,34 @@ fn records(ui: &mut egui::Ui, data: &StationData) {
                 ui.end_row();
             }
         });
+}
+
+fn map_card(ui: &mut egui::Ui, map: &Map) {
+    card_title(ui, "🗺", "Koseze, Ljubljana");
+    let width = ui.available_width();
+    let texture = match map {
+        Map::Ready(texture) => texture,
+        Map::Loading(_) => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(muted("Loading the map…"));
+            });
+            return;
+        }
+        Map::Failed(e) => {
+            ui.label(muted(e.as_str()));
+            return;
+        }
+    };
+    let size = texture.size_vec2() * (width / texture.size_vec2().x);
+    let image = egui::Image::new((texture.id(), size)).corner_radius(10);
+    let response = ui.add(image.sense(Sense::click()));
+    widgets::map_marker(ui.painter(), response.rect.center());
+    if response.on_hover_text("Open in OpenStreetMap").clicked() {
+        ui.ctx()
+            .open_url(egui::OpenUrl::new_tab(map::browser_url()));
+    }
+    ui.label(muted(map::ATTRIBUTION).size(11.0));
 }
 
 fn image_card(ui: &mut egui::Ui, icon: &str, title: &str, path: &str) {

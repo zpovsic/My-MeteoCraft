@@ -247,6 +247,14 @@ pub fn compass(ui: &mut Ui, from_deg: Option<f32>, size: f32) {
     painter.circle_filled(c, 2.0, theme::CARD);
 }
 
+/// A glowing dot marking a place on a map.
+pub fn map_marker(painter: &egui::Painter, at: Pos2) {
+    painter.circle_filled(at, 16.0, theme::ACCENT.gamma_multiply(0.15));
+    painter.circle_filled(at, 10.0, theme::ACCENT.gamma_multiply(0.3));
+    painter.circle_filled(at, 6.0, theme::ACCENT);
+    painter.circle_stroke(at, 6.0, Stroke::new(2.0, Color32::WHITE));
+}
+
 fn unit(deg: f32) -> Vec2 {
     let rad = deg.to_radians();
     Vec2::new(rad.sin(), -rad.cos())
