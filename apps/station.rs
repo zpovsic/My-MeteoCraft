@@ -127,10 +127,7 @@ pub fn parse(html: &str) -> Result<StationData, FetchError> {
     let speed = first_text(&doc, "#veter-spd").ok_or(FetchError::Layout("wind speed"))?;
     let direction = first_text(&doc, "#veter-smer").ok_or(FetchError::Layout("wind direction"))?;
     let wind = Wind {
-        speed_kmh: speed
-            .split_whitespace()
-            .next()
-            .and_then(|s| s.parse().ok()),
+        speed_kmh: speed.split_whitespace().next().and_then(|s| s.parse().ok()),
         direction_deg: direction
             .split_whitespace()
             .rev()
@@ -160,7 +157,11 @@ fn label_value_rows(doc: &Html, row_selector: &str) -> Vec<Reading> {
             let value = cells.next()?;
             Some(Reading {
                 label,
-                value: if has_digit(&value) { value } else { "—".to_owned() },
+                value: if has_digit(&value) {
+                    value
+                } else {
+                    "—".to_owned()
+                },
             })
         })
         .collect()
@@ -189,7 +190,12 @@ fn daily_stats(doc: &Html) -> Vec<DailyStat> {
                 column += span;
             }
             let [min, max, avg] = values;
-            DailyStat { label, min, max, avg }
+            DailyStat {
+                label,
+                min,
+                max,
+                avg,
+            }
         })
         .collect()
 }
@@ -199,10 +205,7 @@ fn records(doc: &Html) -> Vec<Record> {
     let bold = sel("b");
     let font = sel("font");
     let extreme = |cell: ElementRef| {
-        let value = cell
-            .select(&bold)
-            .map(text_of)
-            .find(|v| !v.is_empty())?;
+        let value = cell.select(&bold).map(text_of).find(|v| !v.is_empty())?;
         let when = cell
             .select(&font)
             .next()
@@ -214,7 +217,10 @@ fn records(doc: &Html) -> Vec<Record> {
     doc.select(&sel("#ekstremi tr.datarow"))
         .filter_map(|row| {
             let mut cells = row.select(&td);
-            let label = text_of(cells.next()?).trim_end_matches(':').trim().to_owned();
+            let label = text_of(cells.next()?)
+                .trim_end_matches(':')
+                .trim()
+                .to_owned();
             let min = cells.next().and_then(extreme);
             let max = cells.next().and_then(extreme);
             Some(Record { label, min, max })
@@ -309,7 +315,10 @@ mod tests {
         assert_eq!(min.when, "25.01.2006, 06:22:06");
         assert_eq!(temp.max.as_ref().unwrap().value, "38.60 °C");
 
-        let rain = records.iter().find(|r| r.label == "padavine v 24h").unwrap();
+        let rain = records
+            .iter()
+            .find(|r| r.label == "padavine v 24h")
+            .unwrap();
         assert!(rain.min.is_none());
         assert_eq!(rain.max.as_ref().unwrap().value, "133.05 mm");
     }

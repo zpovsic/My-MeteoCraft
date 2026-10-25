@@ -1,8 +1,8 @@
 //! Reusable drawing helpers for the dashboard.
 
 use eframe::egui::{
-    self, Align2, Color32, FontId, Margin, Mesh, Pos2, Rect, RichText, Sense, Shadow, Shape, Stroke,
-    Ui, Vec2,
+    self, Align2, Color32, FontId, Margin, Mesh, Pos2, Rect, RichText, Sense, Shadow, Shape,
+    Stroke, Ui, Vec2,
 };
 
 use crate::theme;
@@ -38,7 +38,8 @@ pub fn card(ui: &mut Ui, min_height: f32, add_contents: impl FnOnce(&mut Ui)) ->
 /// Cards in a row share the height of the tallest one (measured on the previous frame).
 pub fn card_rows(ui: &mut Ui, id_salt: &str, min_width: f32, cards: Vec<CardFn<'_>>) {
     let gap = ui.spacing().item_spacing.x;
-    let per_row = (((ui.available_width() + gap) / (min_width + gap)) as usize).clamp(1, cards.len().max(1));
+    let per_row =
+        (((ui.available_width() + gap) / (min_width + gap)) as usize).clamp(1, cards.len().max(1));
     let mut cards = cards.into_iter();
     let mut row = 0;
     while cards.len() > 0 {
@@ -69,7 +70,11 @@ pub fn card_title(ui: &mut Ui, icon: &str, title: &str) {
 }
 
 pub fn caption(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text.to_uppercase()).size(11.5).color(theme::MUTED));
+    ui.label(
+        RichText::new(text.to_uppercase())
+            .size(11.5)
+            .color(theme::MUTED),
+    );
 }
 
 pub fn muted(text: impl Into<String>) -> RichText {
@@ -158,10 +163,28 @@ pub fn temperature_range(ui: &mut Ui, min: f32, max: f32, avg: Option<f32>, curr
 
     let label_y = rect.bottom() - 8.0;
     let font = FontId::proportional(12.5);
-    painter.text(Pos2::new(rect.left(), label_y), Align2::LEFT_CENTER, format!("↓ {min:.1} °C"), font.clone(), theme::COLD);
-    painter.text(Pos2::new(rect.right(), label_y), Align2::RIGHT_CENTER, format!("↑ {max:.1} °C"), font.clone(), theme::WARM);
+    painter.text(
+        Pos2::new(rect.left(), label_y),
+        Align2::LEFT_CENTER,
+        format!("↓ {min:.1} °C"),
+        font.clone(),
+        theme::COLD,
+    );
+    painter.text(
+        Pos2::new(rect.right(), label_y),
+        Align2::RIGHT_CENTER,
+        format!("↑ {max:.1} °C"),
+        font.clone(),
+        theme::WARM,
+    );
     if let Some(avg) = avg {
-        painter.text(Pos2::new(rect.center().x, label_y), Align2::CENTER_CENTER, format!("avg {avg:.1} °C"), font, theme::MUTED);
+        painter.text(
+            Pos2::new(rect.center().x, label_y),
+            Align2::CENTER_CENTER,
+            format!("avg {avg:.1} °C"),
+            font,
+            theme::MUTED,
+        );
     }
 }
 
@@ -176,7 +199,13 @@ pub fn compass(ui: &mut Ui, from_deg: Option<f32>, size: f32) {
     painter.circle_stroke(c, radius, Stroke::new(1.0, theme::CARD_STROKE));
     for i in 0..16 {
         let deg = i as f32 * 22.5;
-        let len = if i % 4 == 0 { 9.0 } else if i % 2 == 0 { 6.0 } else { 3.5 };
+        let len = if i % 4 == 0 {
+            9.0
+        } else if i % 2 == 0 {
+            6.0
+        } else {
+            3.5
+        };
         let d = unit(deg);
         painter.line_segment(
             [c + d * (radius - len), c + d * (radius - 1.0)],
@@ -184,8 +213,18 @@ pub fn compass(ui: &mut Ui, from_deg: Option<f32>, size: f32) {
         );
     }
     for (label, deg) in [("N", 0.0_f32), ("E", 90.0), ("S", 180.0), ("W", 270.0)] {
-        let color = if label == "N" { theme::BAD } else { theme::MUTED };
-        painter.text(c + unit(deg) * (radius + 8.0), Align2::CENTER_CENTER, label, FontId::proportional(12.0), color);
+        let color = if label == "N" {
+            theme::BAD
+        } else {
+            theme::MUTED
+        };
+        painter.text(
+            c + unit(deg) * (radius + 8.0),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(12.0),
+            color,
+        );
     }
 
     if let Some(deg) = from_deg {

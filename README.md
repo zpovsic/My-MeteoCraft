@@ -24,6 +24,11 @@ measurements from the HTML and shows them in a native window. It updates itself 
   a countdown and a manual **Refresh** button
 - A dark theme, and a layout that reflows from several columns down to one as the
   window gets narrower
+- **Taskbar widget (Windows):** a notification-area icon showing the current temperature
+  in its color, with a tooltip summarizing the latest reading. The tooltip and the menu
+  follow the taskbar's light or dark theme. Click the icon to open the
+  window; right-click it for **Open MeteoCraft**, **Refresh now** and **Quit**. Closing
+  the window hides it to the icon and the app keeps refreshing; use **Quit** to exit.
 
 The website is in Slovenian; the app shows everything in English.
 
@@ -40,6 +45,10 @@ cargo run --release
 
 The executable is written to `target/release/meteocraft` (`meteocraft.exe` on Windows).
 Release builds on Windows open without a console window.
+
+Windows 11 puts new notification-area icons in the hidden overflow (the **^** arrow).
+To keep the temperature visible on the taskbar, drag the icon out of the overflow, or
+turn on **MeteoCraft** under Settings → Personalization → Taskbar → Other system tray icons.
 
 ## Testing
 
@@ -59,6 +68,10 @@ apps/
   main.rs      App state, background downloads, auto-refresh and the dashboard layout
   station.rs   Downloading and parsing the station page
   theme.rs     Color palette, egui styling and the temperature color scale
+  tray.rs      Windows notification-area icon that draws the temperature and its menu
+  tray/
+    dark_mode.rs  Reads the taskbar theme and applies it to the tray menu
+    tooltip.rs    The icon's hover tooltip, drawn by the app to match the theme
   widgets.rs   Cards, responsive card rows, status badge, compass and temperature bar
 tests/
   fixtures/

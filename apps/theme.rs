@@ -37,7 +37,11 @@ pub fn apply(ctx: &egui::Context) {
     widgets.hovered.weak_bg_fill = Color32::from_rgb(59, 130, 246);
     widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::WHITE);
     widgets.active.weak_bg_fill = Color32::from_rgb(29, 78, 216);
-    for w in [&mut widgets.inactive, &mut widgets.hovered, &mut widgets.active] {
+    for w in [
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+    ] {
         w.corner_radius = 8.into();
         w.bg_stroke = Stroke::NONE;
     }

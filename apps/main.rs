@@ -2,12 +2,14 @@
 
 mod station;
 mod theme;
+#[cfg(windows)]
+mod tray;
 mod widgets;
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Margin, RichText, Sense, Stroke, Vec2};
+use eframe::egui::{self, Margin, RichText, Sense, Stroke, Vec2, ViewportCommand};
 
 use station::{FetchError, StationData};
 use widgets::{CardFn, caption, card_title, muted};
@@ -40,19 +42,71 @@ struct MeteoApp {
     error: Option<String>,
     pending: Option<Receiver<Result<StationData, FetchError>>>,
     last_fetch: Instant,
+    #[cfg(windows)]
+    tray: Option<tray::Tray>,
+    /// Set when the user picks Quit, so closing the window really exits.
+    quitting: bool,
 }
 
 impl MeteoApp {
     fn new(ctx: egui::Context) -> Self {
         let mut app = Self {
+            #[cfg(windows)]
+            tray: tray::Tray::new(&ctx)
+                .inspect_err(|e| eprintln!("tray icon unavailable: {e}"))
+                .ok(),
             ctx,
             data: None,
             error: None,
             pending: None,
             last_fetch: Instant::now(),
+            quitting: false,
         };
         app.refresh();
         app
+    }
+
+    fn has_tray(&self) -> bool {
+        #[cfg(windows)]
+        return self.tray.is_some();
+        #[cfg(not(windows))]
+        false
+    }
+
+    #[cfg(windows)]
+    fn handle_tray(&mut self, ctx: &egui::Context) {
+        while let Some(command) = self.tray.as_ref().and_then(tray::Tray::poll) {
+            match command {
+                tray::Command::Show => {
+                    ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(ViewportCommand::Focus);
+                }
+                tray::Command::Refresh => self.refresh(),
+                tray::Command::Quit => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(ViewportCommand::Close);
+                }
+            }
+        }
+    }
+
+    fn update_tray(&self) {
+        #[cfg(windows)]
+        if let Some(tray) = &self.tray {
+            let temp = self
+                .data
+                .as_ref()
+                .and_then(|d| number(value_of(d.reading("temperatura"))));
+            let mut tooltip = self
+                .data
+                .as_ref()
+                .map_or_else(|| "MeteoCraft".to_owned(), tray_summary);
+            if self.error.is_some() {
+                tooltip.push_str("\nOffline – showing the last data received");
+            }
+            tray.update(temp, &tooltip);
+        }
     }
 
     fn refresh(&mut self) {
@@ -74,9 +128,9 @@ impl MeteoApp {
         let result = match rx.try_recv() {
             Ok(result) => result,
             Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => {
-                Err(FetchError::Http("download thread stopped unexpectedly".into()))
-            }
+            Err(TryRecvError::Disconnected) => Err(FetchError::Http(
+                "download thread stopped unexpectedly".into(),
+            )),
         };
         self.pending = None;
         match result {
@@ -88,6 +142,7 @@ impl MeteoApp {
             }
             Err(e) => self.error = Some(e.to_string()),
         }
+        self.update_tray();
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
@@ -194,6 +249,13 @@ impl MeteoApp {
 
 impl eframe::App for MeteoApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        self.handle_tray(ctx);
+        // With a tray icon, closing the window only hides it; Quit is in the tray menu.
+        if ctx.input(|i| i.viewport().close_requested()) && self.has_tray() && !self.quitting {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        }
         self.poll_fetch();
         if self.last_fetch.elapsed() >= REFRESH_INTERVAL {
             self.refresh();
@@ -327,12 +389,19 @@ fn now_card(ui: &mut egui::Ui, data: &StationData) {
         ui.add_space(8.0);
         ui.vertical(|ui| {
             ui.add_space(8.0);
-            ui.label(RichText::new(conditions(data)).size(17.0).color(theme::TEXT));
+            ui.label(
+                RichText::new(conditions(data))
+                    .size(17.0)
+                    .color(theme::TEXT),
+            );
             ui.label(muted(format!(
                 "Feels like {}",
                 value_of(data.reading("občutek mraza"))
             )));
-            ui.label(muted(format!("Dew point {}", value_of(data.reading("rosišče")))));
+            ui.label(muted(format!(
+                "Dew point {}",
+                value_of(data.reading("rosišče"))
+            )));
         });
     });
 
@@ -360,7 +429,11 @@ fn wind_card(ui: &mut egui::Ui, wind: &station::Wind) {
             caption(ui, "Speed");
             match wind.speed_kmh {
                 Some(kmh) => {
-                    ui.label(RichText::new(format!("{kmh:.1} km/h")).size(28.0).color(theme::TEXT));
+                    ui.label(
+                        RichText::new(format!("{kmh:.1} km/h"))
+                            .size(28.0)
+                            .color(theme::TEXT),
+                    );
                     ui.label(muted(format!("{:.1} m/s  ·  {}", kmh / 3.6, beaufort(kmh))));
                 }
                 None => {
@@ -382,7 +455,13 @@ fn wind_card(ui: &mut egui::Ui, wind: &station::Wind) {
 fn pressure_tile(ui: &mut egui::Ui, data: &StationData) {
     let detail = data
         .daily_stat("tlak")
-        .and_then(|s| Some(format!("today {} – {}", s.min.as_deref()?, s.max.as_deref()?)))
+        .and_then(|s| {
+            Some(format!(
+                "today {} – {}",
+                s.min.as_deref()?,
+                s.max.as_deref()?
+            ))
+        })
         .unwrap_or_default();
     widgets::metric(
         ui,
@@ -398,7 +477,13 @@ fn humidity_tile(ui: &mut egui::Ui, data: &StationData) {
     let value = value_of(data.reading("vlažnost"));
     let detail = data
         .daily_stat("vlaga")
-        .and_then(|s| Some(format!("today {} – {}", s.min.as_deref()?, s.max.as_deref()?)))
+        .and_then(|s| {
+            Some(format!(
+                "today {} – {}",
+                s.min.as_deref()?,
+                s.max.as_deref()?
+            ))
+        })
         .unwrap_or_default();
     widgets::metric(ui, "💧", "Humidity", theme::HUMID, value, &detail);
     if let Some(h) = number(value) {
@@ -419,7 +504,10 @@ fn precipitation_tile(ui: &mut egui::Ui, data: &StationData) {
         "Rain, last hour",
         theme::COLD,
         value_of(data.precipitation("padavine v zadnji uri")),
-        &format!("last 24 h: {}", value_of(data.precipitation("padavine zadnjih 24h"))),
+        &format!(
+            "last 24 h: {}",
+            value_of(data.precipitation("padavine zadnjih 24h"))
+        ),
     );
 }
 
@@ -521,6 +609,28 @@ fn image_card(ui: &mut egui::Ui, icon: &str, title: &str, path: &str) {
     }
 }
 
+/// Tray tooltip, e.g. "Ljubljana Koseze: 8.5 °C / Humidity 87% · wind 0.0 km/h WNW / …".
+#[cfg(windows)]
+fn tray_summary(data: &StationData) -> String {
+    let wind = match data.wind.speed_kmh {
+        Some(kmh) => format!(
+            "{kmh:.1} km/h {}",
+            data.wind
+                .direction
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+        ),
+        None => data.wind.speed.clone(),
+    };
+    format!(
+        "Ljubljana Koseze: {}\nHumidity {} · wind {wind}\nMeasured {}",
+        value_of(data.reading("temperatura")),
+        value_of(data.reading("vlažnost")),
+        data.last_measurement.replace(" ob ", " at "),
+    )
+}
+
 fn value_of(reading: Option<&station::Reading>) -> &str {
     reading.map_or("—", |r| r.value.as_str())
 }
@@ -547,7 +657,8 @@ fn conditions(data: &StationData) -> String {
         Some(_) => "Hot",
         None => "No reading",
     };
-    let raining = number(value_of(data.precipitation("padavine v zadnji uri"))).is_some_and(|mm| mm > 0.0);
+    let raining =
+        number(value_of(data.precipitation("padavine v zadnji uri"))).is_some_and(|mm| mm > 0.0);
     let humid = number(value_of(data.reading("vlažnost"))).is_some_and(|h| h >= 85.0);
     match (raining, humid) {
         (true, _) => format!("{feel}, rain falling"),
