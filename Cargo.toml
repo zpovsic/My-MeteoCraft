@@ -1,0 +1,16 @@
+[package]
+name = "meteocraft"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+
+[[bin]]
+name = "meteocraft"
+path = "apps/main.rs"
+
+[dependencies]
+eframe = "0.37.0"
+egui_extras = { version = "0.37.0", features = ["http", "image"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+scraper = "0.29.0"
+ureq = "3.5.0"
