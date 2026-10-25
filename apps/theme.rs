@@ -1,6 +1,26 @@
 //! Colors and global egui styling.
 
-use eframe::egui::{self, Color32, FontId, Stroke, TextStyle, Theme, ThemePreference, Vec2};
+use eframe::egui::{
+    self, Color32, FontData, FontFamily, FontId, FontInsert, FontPriority, InsertFontFamily,
+    Stroke, TextStyle, Theme, ThemePreference, Vec2,
+};
+
+/// Scales all text and spacing; the sizes used in the code are for a zoom of 1.
+const ZOOM: f32 = 0.85;
+
+/// egui ships no bold face, so a bold system font is used, the first one found.
+const BOLD_FONT_PATHS: [&str; 4] = [
+    r"C:\Windows\Fonts\segoeuib.ttf",
+    r"C:\Windows\Fonts\arialbd.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+];
+
+pub fn bold_font() -> Option<Vec<u8>> {
+    BOLD_FONT_PATHS
+        .iter()
+        .find_map(|path| std::fs::read(path).ok())
+}
 
 pub const BG: Color32 = Color32::from_rgb(13, 18, 29);
 pub const CARD: Color32 = Color32::from_rgb(22, 29, 44);
@@ -21,6 +41,19 @@ pub const HUMID: Color32 = Color32::from_rgb(45, 212, 191);
 pub const SNOW: Color32 = Color32::from_rgb(186, 230, 253);
 
 pub fn apply(ctx: &egui::Context) {
+    // Glyphs the bold font lacks, such as the icons, still come from egui's fonts.
+    if let Some(bytes) = bold_font() {
+        ctx.add_font(FontInsert::new(
+            "bold",
+            FontData::from_owned(bytes),
+            vec![InsertFontFamily {
+                family: FontFamily::Proportional,
+                priority: FontPriority::Highest,
+            }],
+        ));
+    }
+    ctx.set_zoom_factor(ZOOM);
+
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = BG;
     visuals.window_fill = CARD;

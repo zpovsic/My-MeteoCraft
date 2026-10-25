@@ -19,10 +19,6 @@ use tooltip::Tooltip;
 
 /// Icon edge in pixels; Windows scales it to the taskbar's DPI.
 const SIZE: usize = 32;
-const FONT_PATHS: [&str; 2] = [
-    r"C:\Windows\Fonts\segoeuib.ttf",
-    r"C:\Windows\Fonts\arialbd.ttf",
-];
 const HALO: Color32 = Color32::from_rgb(10, 14, 22);
 
 pub enum Command {
@@ -106,10 +102,7 @@ impl Tray {
             _ => {}
         }));
 
-        let font = FONT_PATHS
-            .iter()
-            .find_map(|path| std::fs::read(path).ok())
-            .and_then(|bytes| FontVec::try_from_vec(bytes).ok());
+        let font = theme::bold_font().and_then(|bytes| FontVec::try_from_vec(bytes).ok());
         let icon = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
@@ -275,10 +268,7 @@ mod tests {
     use super::*;
 
     fn system_font() -> Option<FontVec> {
-        FONT_PATHS
-            .iter()
-            .find_map(|p| std::fs::read(p).ok())
-            .and_then(|b| FontVec::try_from_vec(b).ok())
+        theme::bold_font().and_then(|b| FontVec::try_from_vec(b).ok())
     }
 
     fn inked_width(coverage: &[f32]) -> usize {
