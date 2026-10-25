@@ -3,6 +3,9 @@ name = "meteocraft"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
+description = "Desktop app showing live weather data from the Ljubljana Koseze weather station"
+repository = "https://github.com/zpovsic/My-MeteoCraft"
+license = "MIT OR Apache-2.0"
 
 [[bin]]
 name = "meteocraft"
