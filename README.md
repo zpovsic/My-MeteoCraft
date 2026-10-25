@@ -9,14 +9,21 @@ measurements from the HTML and shows them in a native window. It updates itself 
 
 ## Features
 
-- **Current conditions:** temperature, air pressure, humidity, dew point and wind chill
-- **Wind:** speed and direction, with a compass showing where the wind is coming from
-- **Precipitation:** rain in the last hour and last 24 hours, and snow depth
+- **Now:** the current temperature, colored from icy blue to hot red, a plain-English
+  summary such as "Cool and humid", wind chill, dew point, and a bar showing where the
+  current temperature sits within today's range
+- **Wind:** speed in km/h and m/s with its Beaufort description, and a compass showing
+  where the wind is coming from
+- **Tiles:** air pressure, humidity (with a fill bar), rain and snow depth, each with
+  today's range or extra detail
 - **Today's statistics:** minimum, maximum and average for each measurement
 - **All-time records:** with the date and time each was set
 - **Images:** the live camera and the station's temperature and pressure graphs
   (click an image to open it in your browser)
-- Automatic refresh every 5 minutes, with a countdown and a manual **Refresh** button
+- Automatic refresh every 5 minutes, with a status badge (Live, Updating or Offline),
+  a countdown and a manual **Refresh** button
+- A dark theme, and a layout that reflows from several columns down to one as the
+  window gets narrower
 
 The website is in Slovenian; the app shows everything in English.
 
@@ -49,8 +56,10 @@ in the tests.
 
 ```text
 apps/
-  main.rs      Window, layout, background downloads and auto-refresh (eframe/egui)
+  main.rs      App state, background downloads, auto-refresh and the dashboard layout
   station.rs   Downloading and parsing the station page
+  theme.rs     Color palette, egui styling and the temperature color scale
+  widgets.rs   Cards, responsive card rows, status badge, compass and temperature bar
 tests/
   fixtures/
     koseze.html  Saved copy of the station page used by the tests

@@ -57,6 +57,16 @@ impl StationData {
             .iter()
             .find(|r| r.label.starts_with(label_prefix))
     }
+
+    pub fn precipitation(&self, label_prefix: &str) -> Option<&Reading> {
+        self.precipitation
+            .iter()
+            .find(|r| r.label.starts_with(label_prefix))
+    }
+
+    pub fn daily_stat(&self, label: &str) -> Option<&DailyStat> {
+        self.daily.iter().find(|s| s.label == label)
+    }
 }
 
 #[derive(Debug)]
