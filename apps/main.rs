@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app_window;
+mod charts;
+mod history;
 mod map;
 mod sky;
 mod station;
@@ -64,6 +66,117 @@ struct MeteoApp {
     quitting: bool,
     /// Launched at sign-in: hide the window on the first frame and live in the tray.
     start_in_tray: bool,
+    /// The window with the last 24 hours as charts, while it is open.
+    charts: Option<ChartsWindow>,
+}
+
+struct ChartsWindow {
+    history: Option<history::History>,
+    error: Option<String>,
+    pending: Option<Receiver<Result<history::History, String>>>,
+    size: egui::Vec2,
+    position: Option<egui::Pos2>,
+}
+
+impl ChartsWindow {
+    /// Tall enough to show all the charts without scrolling.
+    const SIZE: egui::Vec2 = egui::vec2(1060.0, 1060.0);
+    /// Leaves room for the title bar and the taskbar.
+    const SCREEN_MARGIN: f32 = 140.0;
+
+    fn new(monitor: Option<egui::Vec2>) -> Self {
+        let size = match monitor {
+            Some(monitor) => Self::SIZE.min(monitor - egui::Vec2::splat(Self::SCREEN_MARGIN)),
+            None => Self::SIZE,
+        };
+        Self {
+            history: None,
+            error: None,
+            pending: None,
+            size,
+            position: monitor.map(|monitor| ((monitor - size) / 2.0).max(egui::Vec2::ZERO).to_pos2()),
+        }
+    }
+
+    fn viewport_id() -> egui::ViewportId {
+        egui::ViewportId::from_hash_of("charts")
+    }
+
+    /// Set for a frame by a click on one of the station's graphs.
+    fn request_id() -> egui::Id {
+        egui::Id::unique("open-charts")
+    }
+
+    fn load(&mut self, ctx: &egui::Context) {
+        if self.pending.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(history::fetch());
+            ctx.request_repaint();
+        });
+        self.pending = Some(rx);
+    }
+
+    fn poll(&mut self) {
+        let Some(rx) = &self.pending else { return };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("download thread stopped unexpectedly".into()),
+        };
+        self.pending = None;
+        match result {
+            Ok(history) => {
+                self.history = Some(history);
+                self.error = None;
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    fn ui(&self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("Last 24 hours")
+                    .size(24.0)
+                    .strong()
+                    .color(theme::TEXT),
+            );
+            if self.pending.is_some() {
+                ui.spinner();
+            }
+        });
+        let until = self
+            .history
+            .as_ref()
+            .and_then(|h| h.temperature.last())
+            .map_or_else(String::new, |p| {
+                format!(" · up to {}", charts::clock(p.minutes))
+            });
+        ui.label(muted(format!(
+            "Ljubljana Koseze, read from the station's graphs{until}"
+        )));
+        if let Some(err) = &self.error {
+            ui.label(
+                RichText::new(format!("⚠  Could not read the graphs: {err}")).color(theme::BAD),
+            );
+        }
+        ui.add_space(10.0);
+        match &self.history {
+            Some(history) => {
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .show(ui, |ui| charts::show(ui, history));
+            }
+            None if self.pending.is_some() => {
+                ui.label(muted("Reading the station's graphs…"));
+            }
+            None => {}
+        }
+    }
 }
 
 enum Map {
@@ -106,6 +219,7 @@ impl MeteoApp {
             start_in_tray: std::env::args().any(|arg| arg == tray::TRAY_ARG),
             #[cfg(not(windows))]
             start_in_tray: false,
+            charts: None,
         };
         app.refresh();
         app
@@ -235,6 +349,9 @@ impl MeteoApp {
                 self.error = None;
                 // The graphs are regenerated on the server alongside the data.
                 self.ctx.forget_all_images();
+                if let Some(charts) = &mut self.charts {
+                    charts.load(&self.ctx);
+                }
                 if matches!(self.map, Map::Failed(_)) {
                     self.map = Map::load(&self.ctx);
                 }
@@ -440,9 +557,18 @@ impl eframe::App for MeteoApp {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         }
+        if ctx
+            .data_mut(|d| d.remove_temp::<bool>(ChartsWindow::request_id()))
+            .is_some()
+        {
+            self.open_charts(ctx);
+        }
         self.poll_fetch();
         self.poll_sky();
         self.poll_map();
+        if let Some(charts) = &mut self.charts {
+            charts.poll();
+        }
         if self.last_fetch.elapsed() >= self.refresh_interval() {
             self.refresh();
         }
@@ -489,6 +615,47 @@ impl eframe::App for MeteoApp {
                             });
                     });
             });
+
+        self.show_charts(ui.ctx());
+    }
+}
+
+impl MeteoApp {
+    fn open_charts(&mut self, ctx: &egui::Context) {
+        match &mut self.charts {
+            Some(_) => {
+                ctx.send_viewport_cmd_to(ChartsWindow::viewport_id(), ViewportCommand::Focus)
+            }
+            None => {
+                let mut charts = ChartsWindow::new(ctx.input(|i| i.viewport().monitor_size));
+                charts.load(ctx);
+                self.charts = Some(charts);
+            }
+        }
+    }
+
+    fn show_charts(&mut self, ctx: &egui::Context) {
+        let Some(charts) = &self.charts else { return };
+        let mut builder = egui::ViewportBuilder::default()
+            .with_title("MeteoCraft – Last 24 hours")
+            .with_inner_size(charts.size)
+            .with_min_inner_size([480.0, 400.0]);
+        if let Some(position) = charts.position {
+            builder = builder.with_position(position);
+        }
+        let close = ctx.show_viewport_immediate(ChartsWindow::viewport_id(), builder, |ui, _| {
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::BG)
+                        .inner_margin(Margin::symmetric(24, 18)),
+                )
+                .show(ui, |ui| charts.ui(ui));
+            ui.input(|i| i.viewport().close_requested())
+        });
+        if close {
+            self.charts = None;
+        }
     }
 }
 
@@ -833,8 +1000,14 @@ fn image_card(ui: &mut egui::Ui, icon: &str, title: &str, path: &str) {
         .corner_radius(10)
         .show_loading_spinner(true);
     let response = ui.add(image.sense(Sense::click()));
-    if response.on_hover_text("Open in browser").clicked() {
-        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+    if response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Open the last 24 hours as charts")
+        .clicked()
+    {
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(ChartsWindow::request_id(), true));
+        ui.ctx().request_repaint();
     }
 }
 

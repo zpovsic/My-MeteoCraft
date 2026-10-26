@@ -28,8 +28,12 @@ measurements from the HTML and shows them in a native window. It updates itself 
 - **Map and graphs:** a dark map of Koseze, from Google Maps when you
   [set an API key](#google-maps) and from OpenStreetMap otherwise, and the station's
   temperature and pressure graphs. Click the map to open Google Maps at Koseze in a window
-  of its own (the MeteoCraft window hides to the taskbar widget), or a graph to open it in
-  your browser
+  of its own (the MeteoCraft window hides to the taskbar widget)
+- **Last 24 hours:** click a graph to open a window with the app's own charts of
+  temperature (with wind chill and heat index where they differ), air pressure and
+  humidity. Each shows its low and high, and hovering shows the values at that time
+  on every chart. The station publishes this history only as graph images, so the app
+  reads the values out of them
 - Automatic refresh every 5 minutes, with a status badge (Live, Updating or Offline),
   a countdown and a manual **Refresh** button
 - A dark theme, and a layout that reflows from several columns down to one as the
@@ -105,13 +109,18 @@ The parser tests run against saved copies of the station page in
 `tests/fixtures/koseze.html` and of the ARSO observation in
 `tests/fixtures/arso-bezigrad.xml`, so they don't need network access. If the website's layout
 changes, download a fresh copy of the page into that file and update the expected values
-in the tests.
+in the tests. Likewise, the tests that read values out of the graphs use saved copies of
+the three graph images.
 
 ## Project layout
 
 ```text
 apps/
   app_window.rs  Opens a web page in a window of its own
+  charts.rs    The "Last 24 hours" charts
+  history.rs   The last 24 hours of measurements, read from the station's graphs
+  history/
+    digitize.rs  Reads the axes and lines of an RRDtool graph image
   main.rs      App state, background downloads, auto-refresh and the dashboard layout
   map.rs       The map of Koseze, from Google Maps or OpenStreetMap, in a dark style
   sky.rs       The current weather from ARSO's Ljubljana Bežigrad observation
@@ -129,6 +138,7 @@ apps/
 tests/
   fixtures/
     arso-bezigrad.xml  Saved ARSO observation used by the tests
+    graf*.png          Saved copies of the station's three graphs
     koseze.html        Saved copy of the station page used by the tests
 ```
 
@@ -139,6 +149,14 @@ tests/
 - Downloads run on a background thread so the window stays responsive.
 - The graph images are loaded directly from the station's server by `egui_extras` and
   reloaded whenever new data arrives.
+- For the charts, `history::fetch()` downloads three graphs and reads them back into
+  numbers. The graphs are drawn by RRDtool: it finds the white plot area, reads the value
+  and hour labels by matching each 6×7 pixel character against templates of the graph
+  font, and maps every column of each line color to a time and a value. A column where
+  the line steps holds both levels, so the new level is the end away from the previous
+  one. The values are as precise as the graphs' pixels: about 2 minutes across, and one
+  pixel of each graph's scale up and down (about 1.3 hPa for the pressure). While the
+  charts are open they are reread with every refresh.
 - With a key, the map is a single Maps Static API image in a dark style set through the
   API's styling parameters. Google's terms don't allow storing it, so it is downloaded on
   every start.
