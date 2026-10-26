@@ -18,8 +18,9 @@ use windows_sys::Win32::UI::HiDpi::{
     GetDpiForMonitor, MDT_EFFECTIVE_DPI, SystemParametersInfoForDpi,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, CS_DROPSHADOW, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA,
-    GetClientRect, GetCursorPos, GetWindowLongPtrW, HTTRANSPARENT, HWND_TOPMOST, KillTimer,
+    CREATESTRUCTW, CS_DROPSHADOW, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    GUI_POPUPMENUMODE, GUITHREADINFO, GWLP_USERDATA, GetClientRect, GetCursorPos, GetGUIThreadInfo,
+    GetWindowLongPtrW, GetWindowThreadProcessId, HTTRANSPARENT, HWND_TOPMOST, KillTimer,
     NONCLIENTMETRICSW, PostMessageW, RegisterClassExW, SPI_GETNONCLIENTMETRICS, SW_HIDE,
     SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_APP,
     WM_NCCREATE, WM_NCDESTROY, WM_NCHITTEST, WM_PAINT, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE,
@@ -217,7 +218,7 @@ unsafe extern "system" fn window_proc(
             }
             WM_TIMER if wparam == SHOW_TIMER || wparam == WATCH_TIMER => {
                 if let Some(state) = state(hwnd) {
-                    if !cursor_within(&state.anchor) {
+                    if !cursor_within(&state.anchor) || menu_open(hwnd) {
                         hide(hwnd, state);
                     } else if wparam == SHOW_TIMER {
                         KillTimer(hwnd, SHOW_TIMER);
@@ -253,6 +254,19 @@ unsafe extern "system" fn window_proc(
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
     }
+}
+
+/// The tray menu runs on this window's thread and must not end up under the tooltip.
+fn menu_open(hwnd: HWND) -> bool {
+    let mut info = GUITHREADINFO {
+        cbSize: size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    let found = unsafe {
+        let thread = GetWindowThreadProcessId(hwnd, null_mut());
+        GetGUIThreadInfo(thread, &mut info)
+    };
+    found != 0 && info.flags & GUI_POPUPMENUMODE != 0
 }
 
 /// Sizes the tooltip to its text and places it next to the taskbar under the cursor.

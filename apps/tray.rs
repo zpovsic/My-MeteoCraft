@@ -5,16 +5,18 @@ use std::sync::mpsc::{self, Receiver};
 
 use ab_glyph::{Font as _, FontVec, OutlinedGlyph, PxScale, ScaleFont as _, point};
 use eframe::egui::{self, Color32};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{
     BadIcon, Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
 
 use crate::theme;
 
+mod autostart;
 mod dark_mode;
 mod tooltip;
 
+pub use autostart::TRAY_ARG;
 use tooltip::Tooltip;
 
 /// Icon edge in pixels; Windows scales it to the taskbar's DPI.
@@ -27,39 +29,61 @@ pub enum Command {
     Quit,
 }
 
+/// What the tray's event handlers report; `ToggleAutostart` is handled by the tray itself.
+enum Event {
+    Command(Command),
+    ToggleAutostart,
+}
+
 pub struct Tray {
     icon: TrayIcon,
     tooltip: Option<Tooltip>,
     font: Option<FontVec>,
-    commands: Receiver<Command>,
+    autostart: CheckMenuItem,
+    events: Receiver<Event>,
 }
 
 impl Tray {
     /// Must be called on the thread that runs the window's event loop.
     pub fn new(ctx: &egui::Context) -> Result<Self, Box<dyn Error>> {
-        let (tx, commands) = mpsc::channel();
+        let (tx, events) = mpsc::channel();
 
         let open = MenuItem::new("Open MeteoCraft", true, None);
         let refresh = MenuItem::new("Refresh now", true, None);
+        let autostart =
+            CheckMenuItem::new("Start with Windows", true, autostart::is_enabled(), None);
         let quit = MenuItem::new("Quit", true, None);
-        let menu = Menu::with_items(&[&open, &refresh, &PredefinedMenuItem::separator(), &quit])?;
+        let menu = Menu::with_items(&[
+            &open,
+            &refresh,
+            &PredefinedMenuItem::separator(),
+            &autostart,
+            &PredefinedMenuItem::separator(),
+            &quit,
+        ])?;
 
         // Both handlers run on the event-loop thread while the window may be hidden,
-        // so they wake egui up to process the command.
-        let (open_id, refresh_id, quit_id) =
-            (open.id().clone(), refresh.id().clone(), quit.id().clone());
+        // so they wake egui up to process the event.
+        let (open_id, refresh_id, autostart_id, quit_id) = (
+            open.id().clone(),
+            refresh.id().clone(),
+            autostart.id().clone(),
+            quit.id().clone(),
+        );
         let (menu_tx, menu_ctx) = (tx.clone(), ctx.clone());
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-            let command = if event.id == open_id {
-                Command::Show
+            let event = if event.id == open_id {
+                Event::Command(Command::Show)
             } else if event.id == refresh_id {
-                Command::Refresh
+                Event::Command(Command::Refresh)
+            } else if event.id == autostart_id {
+                Event::ToggleAutostart
             } else if event.id == quit_id {
-                Command::Quit
+                Event::Command(Command::Quit)
             } else {
                 return;
             };
-            let _ = menu_tx.send(command);
+            let _ = menu_tx.send(event);
             menu_ctx.request_repaint();
         }));
 
@@ -93,7 +117,7 @@ impl Tray {
                     // The menu opens on release; the theme may have changed since the last time.
                     (MouseButton::Right, MouseButtonState::Down) => dark_mode::theme_menus(),
                     (MouseButton::Left, MouseButtonState::Up) => {
-                        let _ = tx.send(Command::Show);
+                        let _ = tx.send(Event::Command(Command::Show));
                         click_ctx.request_repaint();
                     }
                     _ => {}
@@ -113,7 +137,8 @@ impl Tray {
             icon,
             tooltip,
             font,
-            commands,
+            autostart,
+            events,
         })
     }
 
@@ -127,7 +152,18 @@ impl Tray {
     }
 
     pub fn poll(&self) -> Option<Command> {
-        self.commands.try_recv().ok()
+        loop {
+            match self.events.try_recv().ok()? {
+                Event::Command(command) => return Some(command),
+                Event::ToggleAutostart => {
+                    // The menu has already flipped the check mark; make it match the registry.
+                    if let Err(e) = autostart::set(self.autostart.is_checked()) {
+                        eprintln!("could not change the sign-in setting: {e}");
+                    }
+                    self.autostart.set_checked(autostart::is_enabled());
+                }
+            }
+        }
     }
 }
 

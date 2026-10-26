@@ -17,6 +17,8 @@ use widgets::{CardFn, caption, card_title, muted};
 
 /// The station page itself refreshes every 5 minutes.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+/// Until the first download succeeds (e.g. the network isn't up yet right after sign-in).
+const RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -48,6 +50,8 @@ struct MeteoApp {
     tray: Option<tray::Tray>,
     /// Set when the user picks Quit, so closing the window really exits.
     quitting: bool,
+    /// Launched at sign-in: hide the window on the first frame and live in the tray.
+    start_in_tray: bool,
 }
 
 enum Map {
@@ -56,17 +60,22 @@ enum Map {
     Failed(String),
 }
 
-impl MeteoApp {
-    fn new(ctx: egui::Context) -> Self {
+impl Map {
+    fn load(ctx: &egui::Context) -> Self {
         let (tx, rx) = mpsc::channel();
-        let map_ctx = ctx.clone();
+        let ctx = ctx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(map::load());
-            map_ctx.request_repaint();
+            ctx.request_repaint();
         });
+        Map::Loading(rx)
+    }
+}
 
+impl MeteoApp {
+    fn new(ctx: egui::Context) -> Self {
         let mut app = Self {
-            map: Map::Loading(rx),
+            map: Map::load(&ctx),
             #[cfg(windows)]
             tray: tray::Tray::new(&ctx)
                 .inspect_err(|e| eprintln!("tray icon unavailable: {e}"))
@@ -77,6 +86,10 @@ impl MeteoApp {
             pending: None,
             last_fetch: Instant::now(),
             quitting: false,
+            #[cfg(windows)]
+            start_in_tray: std::env::args().any(|arg| arg == tray::TRAY_ARG),
+            #[cfg(not(windows))]
+            start_in_tray: false,
         };
         app.refresh();
         app
@@ -125,6 +138,14 @@ impl MeteoApp {
         }
     }
 
+    fn refresh_interval(&self) -> Duration {
+        if self.data.is_none() {
+            RETRY_INTERVAL
+        } else {
+            REFRESH_INTERVAL
+        }
+    }
+
     fn refresh(&mut self) {
         if self.pending.is_some() {
             return;
@@ -155,6 +176,9 @@ impl MeteoApp {
                 self.error = None;
                 // The graphs are regenerated on the server alongside the data.
                 self.ctx.forget_all_images();
+                if matches!(self.map, Map::Failed(_)) {
+                    self.map = Map::load(&self.ctx);
+                }
             }
             Err(e) => self.error = Some(e.to_string()),
         }
@@ -243,7 +267,9 @@ impl MeteoApp {
 
     fn countdown(&self, ui: &mut egui::Ui) {
         if self.pending.is_none() {
-            let left = REFRESH_INTERVAL.saturating_sub(self.last_fetch.elapsed());
+            let left = self
+                .refresh_interval()
+                .saturating_sub(self.last_fetch.elapsed());
             ui.label(
                 muted(format!(
                     "next update in {}:{:02}",
@@ -283,6 +309,10 @@ impl eframe::App for MeteoApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         #[cfg(windows)]
         self.handle_tray(ctx);
+        // eframe shows the window after the first frame, then applies this frame's commands.
+        if std::mem::take(&mut self.start_in_tray) && self.has_tray() {
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        }
         // With a tray icon, closing the window only hides it; Quit is in the tray menu.
         if ctx.input(|i| i.viewport().close_requested()) && self.has_tray() && !self.quitting {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
@@ -290,7 +320,7 @@ impl eframe::App for MeteoApp {
         }
         self.poll_fetch();
         self.poll_map();
-        if self.last_fetch.elapsed() >= REFRESH_INTERVAL {
+        if self.last_fetch.elapsed() >= self.refresh_interval() {
             self.refresh();
         }
         // Repaint once a second so the countdown stays current.

@@ -27,8 +27,9 @@ measurements from the HTML and shows them in a native window. It updates itself 
 - **Taskbar widget (Windows):** a notification-area icon showing the current temperature
   in its color, with a tooltip summarizing the latest reading. The tooltip and the menu
   follow the taskbar's light or dark theme. Click the icon to open the
-  window; right-click it for **Open MeteoCraft**, **Refresh now** and **Quit**. Closing
-  the window hides it to the icon and the app keeps refreshing; use **Quit** to exit.
+  window; right-click it for **Open MeteoCraft**, **Refresh now**, **Start with Windows**
+  and **Quit**. Closing the window hides it to the icon and the app keeps refreshing; use
+  **Quit** to exit.
 
 The website is in Slovenian; the app shows everything in English.
 
@@ -49,6 +50,22 @@ Release builds on Windows open without a console window.
 Windows 11 puts new notification-area icons in the hidden overflow (the **^** arrow).
 To keep the temperature visible on the taskbar, drag the icon out of the overflow, or
 turn on **MeteoCraft** under Settings → Personalization → Taskbar → Other system tray icons.
+
+### Starting with Windows
+
+Check **Start with Windows** in the icon's menu to start MeteoCraft when you sign in. It
+adds a `MeteoCraft` entry under
+`HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run` that runs the current
+executable with `--tray`, so it starts hidden in the notification area. Until the first
+download succeeds (the network may still be connecting), it retries every 30 seconds.
+Uncheck the item to remove the entry.
+
+The entry points at the executable's current location, so if you move or rename the
+program, check the item again from the new copy. You can run it the same way by hand:
+
+```sh
+meteocraft --tray
+```
 
 ## Testing
 
@@ -71,6 +88,7 @@ apps/
   theme.rs     Color palette, egui styling and the temperature color scale
   tray.rs      Windows notification-area icon that draws the temperature and its menu
   tray/
+    autostart.rs  The "Start with Windows" entry in the registry's Run key
     dark_mode.rs  Reads the taskbar theme and applies it to the tray menu
     tooltip.rs    The icon's hover tooltip, drawn by the app to match the theme
   widgets.rs   Cards, responsive card rows, status badge, compass and temperature bar
