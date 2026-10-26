@@ -9,6 +9,8 @@ use std::time::Duration;
 pub const SOURCE: &str = "ARSO · Ljubljana Bežigrad";
 /// ARSO publishes a new observation every 10 minutes.
 pub const PICKUP_PERIOD: Duration = Duration::from_secs(600);
+/// ARSO's forecast chart for Ljubljana.
+pub const FORECAST_URL: &str = "https://vreme.arso.gov.si/napoved/Ljubljana/graf";
 const OBSERVATION_URL: &str = "https://meteo.arso.gov.si/uploads/probase/www/observ/surface/text/sl/observationAms_LJUBL-ANA_BEZIGRAD_latest.xml";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

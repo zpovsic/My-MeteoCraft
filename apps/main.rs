@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app_window;
 mod map;
 mod sky;
 mod station;
@@ -335,11 +336,25 @@ impl MeteoApp {
             painter.galley(Pos2::new(left, top), title.clone(), theme::TEXT);
             painter.galley(Pos2::new(left, top + title.size().y), source, theme::MUTED);
         }
-        ui.interact(badge, ui.scope_id().with("sky-badge"), Sense::hover())
+        let response = ui
+            .interact(badge, ui.scope_id().with("sky-badge"), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(format!(
-                "{} – observed by ARSO at Ljubljana Bežigrad, about 3 km east of Koseze, at {}",
+                "{} – observed by ARSO at Ljubljana Bežigrad, about 3 km east of Koseze, at {}\n\
+                 Click to open ARSO's forecast for Ljubljana",
                 sky.description, sky.observed
             ));
+        if response.clicked() {
+            let ctx = ui.ctx();
+            if !app_window::open(sky::FORECAST_URL) {
+                ctx.open_url(egui::OpenUrl::new_tab(sky::FORECAST_URL));
+            }
+            if self.has_tray() {
+                ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+            } else {
+                ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+            }
+        }
     }
 
     fn title_block(&self, ui: &mut egui::Ui) -> Rect {

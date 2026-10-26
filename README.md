@@ -12,7 +12,10 @@ measurements from the HTML and shows them in a native window. It updates itself 
 - **Current weather:** a symbol (sun or moon, clouds, rain, snow, fog, thunderstorm) and
   a description such as "Partly cloudy" or "Light rain" in the middle of the header. The
   Koseze station doesn't observe the sky, so this comes from the official ARSO
-  observation at Ljubljana Bežigrad, about 3 km east
+  observation at Ljubljana Bežigrad, about 3 km east. Click it to open ARSO's
+  [forecast chart for Ljubljana](https://vreme.arso.gov.si/napoved/Ljubljana/graf) in a
+  window of its own (Microsoft Edge in app mode, or a browser tab if Edge is missing);
+  the MeteoCraft window hides to the taskbar widget
 - **Now:** the current temperature, colored from icy blue to hot red, a plain-English
   summary such as "Cool and humid", wind chill, dew point, and a bar showing where the
   current temperature sits within today's range
@@ -89,6 +92,7 @@ in the tests.
 
 ```text
 apps/
+  app_window.rs  Opens a web page in a window of its own
   main.rs      App state, background downloads, auto-refresh and the dashboard layout
   map.rs       The map of Koseze, stitched from OpenStreetMap tiles and darkened
   sky.rs       The current weather from ARSO's Ljubljana Bežigrad observation
