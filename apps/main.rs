@@ -67,8 +67,9 @@ struct MeteoApp {
 }
 
 enum Map {
-    Loading(Receiver<Result<egui::ColorImage, String>>),
-    Ready(egui::TextureHandle),
+    Loading(Receiver<Result<map::Map, String>>),
+    /// The map and its attribution.
+    Ready(egui::TextureHandle, String),
     Failed(String),
 }
 
@@ -246,11 +247,11 @@ impl MeteoApp {
     fn poll_map(&mut self) {
         let Map::Loading(rx) = &self.map else { return };
         self.map = match rx.try_recv() {
-            Ok(Ok(image)) => Map::Ready(self.ctx.load_texture(
-                "koseze-map",
-                image,
-                egui::TextureOptions::LINEAR,
-            )),
+            Ok(Ok(map)) => Map::Ready(
+                self.ctx
+                    .load_texture("koseze-map", map.image, egui::TextureOptions::LINEAR),
+                map.attribution,
+            ),
             Ok(Err(e)) => Map::Failed(e),
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => {
@@ -345,15 +346,7 @@ impl MeteoApp {
                 sky.description, sky.observed
             ));
         if response.clicked() {
-            let ctx = ui.ctx();
-            if !app_window::open(sky::FORECAST_URL) {
-                ctx.open_url(egui::OpenUrl::new_tab(sky::FORECAST_URL));
-            }
-            if self.has_tray() {
-                ctx.send_viewport_cmd(ViewportCommand::Visible(false));
-            } else {
-                ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
-            }
+            open_in_window(ui.ctx(), sky::FORECAST_URL, self.has_tray());
         }
     }
 
@@ -492,7 +485,7 @@ impl eframe::App for MeteoApp {
                                 if let Some(err) = &self.error {
                                     error_banner(ui, err);
                                 }
-                                dashboard(ui, data, &self.map);
+                                dashboard(ui, data, &self.map, self.has_tray());
                             });
                     });
             });
@@ -541,7 +534,7 @@ fn error_banner(ui: &mut egui::Ui, err: &str) {
     ui.add_space(12.0);
 }
 
-fn dashboard(ui: &mut egui::Ui, data: &StationData, map: &Map) {
+fn dashboard(ui: &mut egui::Ui, data: &StationData, map: &Map, has_tray: bool) {
     widgets::card_rows(
         ui,
         "overview",
@@ -564,7 +557,7 @@ fn dashboard(ui: &mut egui::Ui, data: &StationData, map: &Map) {
     widgets::card_rows(ui, "records", 0.0, vec![Box::new(|ui| records(ui, data))]);
 
     let images: Vec<CardFn> = vec![
-        Box::new(|ui| map_card(ui, map)),
+        Box::new(move |ui| map_card(ui, map, has_tray)),
         Box::new(|ui| image_card(ui, "📈", "Temperature and wind chill", "graf.png")),
         Box::new(|ui| image_card(ui, "📉", "Air pressure", "graf_tlak.png")),
     ];
@@ -787,11 +780,23 @@ fn records(ui: &mut egui::Ui, data: &StationData) {
         });
 }
 
-fn map_card(ui: &mut egui::Ui, map: &Map) {
+/// Opens `url` in a window of its own and hides ours, as closing it would.
+fn open_in_window(ctx: &egui::Context, url: &str, has_tray: bool) {
+    if !app_window::open(url) {
+        ctx.open_url(egui::OpenUrl::new_tab(url));
+    }
+    if has_tray {
+        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+    } else {
+        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+    }
+}
+
+fn map_card(ui: &mut egui::Ui, map: &Map, has_tray: bool) {
     card_title(ui, "🗺", "Koseze, Ljubljana");
     let width = ui.available_width();
-    let texture = match map {
-        Map::Ready(texture) => texture,
+    let (texture, attribution) = match map {
+        Map::Ready(texture, attribution) => (texture, attribution),
         Map::Loading(_) => {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -808,11 +813,14 @@ fn map_card(ui: &mut egui::Ui, map: &Map) {
     let image = egui::Image::new((texture.id(), size)).corner_radius(10);
     let response = ui.add(image.sense(Sense::click()));
     widgets::map_marker(ui.painter(), response.rect.center());
-    if response.on_hover_text("Open in OpenStreetMap").clicked() {
-        ui.ctx()
-            .open_url(egui::OpenUrl::new_tab(map::browser_url()));
+    if response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Open in Google Maps")
+        .clicked()
+    {
+        open_in_window(ui.ctx(), &map::browser_url(), has_tray);
     }
-    ui.label(muted(map::ATTRIBUTION).size(11.0));
+    ui.label(muted(attribution.as_str()).size(11.0));
 }
 
 fn image_card(ui: &mut egui::Ui, icon: &str, title: &str, path: &str) {

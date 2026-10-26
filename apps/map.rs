@@ -1,4 +1,5 @@
-//! A map of Koseze, stitched from OpenStreetMap tiles and darkened to suit the theme.
+//! A map of Koseze in a dark style to suit the theme: from the Google Maps Static API
+//! when an API key is set, otherwise stitched from OpenStreetMap tiles and darkened.
 
 use std::error::Error;
 use std::path::PathBuf;
@@ -7,13 +8,30 @@ use std::time::Duration;
 use eframe::egui::ColorImage;
 use image::RgbaImage;
 
-pub const ATTRIBUTION: &str = "© OpenStreetMap contributors";
+/// The environment variable holding a Google Maps Platform API key.
+pub const GOOGLE_KEY_VARIABLE: &str = "METEOCRAFT_GOOGLE_MAPS_KEY";
+const OSM_ATTRIBUTION: &str = "© OpenStreetMap contributors";
 /// The Koseze quarter as placed by OpenStreetMap; the station's exact position isn't published.
 const CENTER: (f64, f64) = (46.07134, 14.46956);
 const ZOOM: u32 = 15;
 const TILE: u32 = 256;
 /// Map size in pixels; wide like the station's graphs next to it.
 const SIZE: [u32; 2] = [768, 384];
+/// The largest size the Static API serves, drawn at twice the resolution.
+const GOOGLE_SIZE: [u32; 2] = [640, 320];
+/// Google's dark "night" colors, close to the app's theme.
+const GOOGLE_STYLE: &[&str] = &[
+    "element:geometry|color:0x1d2c3e",
+    "element:labels.text.stroke|color:0x1d2c3e",
+    "element:labels.text.fill|color:0x8a96a8",
+    "feature:poi|element:labels|visibility:off",
+    "feature:transit|visibility:off",
+    "feature:road|element:geometry|color:0x34445a",
+    "feature:road|element:geometry.stroke|color:0x1a2433",
+    "feature:road.highway|element:geometry|color:0x4b5c75",
+    "feature:water|element:geometry|color:0x0f2238",
+    "feature:poi.park|element:geometry|color:0x1f3a35",
+];
 /// OpenStreetMap's tile policy asks clients to cache, and the streets rarely change.
 const MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const USER_AGENT: &str = concat!(
@@ -26,14 +44,75 @@ const USER_AGENT: &str = concat!(
 
 type BoxError = Box<dyn Error + Send + Sync>;
 
-pub fn browser_url() -> String {
-    let (lat, lon) = CENTER;
-    format!("https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=16/{lat}/{lon}")
+pub struct Map {
+    pub image: ColorImage,
+    /// Credit for the map data, plus why Google's map isn't shown if a key was set.
+    pub attribution: String,
 }
 
-/// Loads the map from the cache, downloading it when missing or stale. The map's
-/// center is the location of Koseze.
-pub fn load() -> Result<ColorImage, String> {
+/// Koseze in Google Maps.
+pub fn browser_url() -> String {
+    let (lat, lon) = CENTER;
+    format!("https://www.google.com/maps/search/?api=1&query={lat},{lon}")
+}
+
+/// Loads the map, centered on Koseze: Google's when a key is set and it downloads,
+/// otherwise OpenStreetMap's.
+pub fn load() -> Result<Map, String> {
+    let key = std::env::var(GOOGLE_KEY_VARIABLE).unwrap_or_default();
+    let mut attribution = OSM_ATTRIBUTION.to_owned();
+    if !key.trim().is_empty() {
+        match download_google(key.trim()) {
+            Ok(map) => {
+                return Ok(Map {
+                    image: color_image(&map),
+                    attribution: "Map data © Google".into(),
+                });
+            }
+            Err(e) => attribution.push_str(&format!(" · Google Maps unavailable: {e}")),
+        }
+    }
+    Ok(Map {
+        image: color_image(&load_osm()?),
+        attribution,
+    })
+}
+
+fn color_image(map: &RgbaImage) -> ColorImage {
+    ColorImage::from_rgba_unmultiplied([map.width() as usize, map.height() as usize], map.as_raw())
+}
+
+/// Google's terms don't allow storing its map images, so this downloads on every start.
+fn download_google(key: &str) -> Result<RgbaImage, BoxError> {
+    let (lat, lon) = CENTER;
+    let [width, height] = GOOGLE_SIZE;
+    let mut url = format!(
+        "https://maps.googleapis.com/maps/api/staticmap?center={lat},{lon}&zoom={ZOOM}\
+         &size={width}x{height}&scale=2&maptype=roadmap&key={key}"
+    );
+    for style in GOOGLE_STYLE {
+        url.push_str("&style=");
+        url.push_str(&style.replace('|', "%7C"));
+    }
+    let mut response = ureq::get(&url)
+        .header("User-Agent", USER_AGENT)
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()?;
+    let status = response.status();
+    let bytes = response.body_mut().read_to_vec()?;
+    if !status.is_success() {
+        // The Static API explains a rejected key or request in a short text body.
+        let reason = String::from_utf8_lossy(&bytes);
+        let reason = reason.lines().next().unwrap_or("").trim();
+        return Err(format!("HTTP {} {reason}", status.as_u16()).into());
+    }
+    Ok(image::load_from_memory(&bytes)?.to_rgba8())
+}
+
+/// Loads the OpenStreetMap map from the cache, downloading it when missing or stale.
+fn load_osm() -> Result<RgbaImage, String> {
     let path = cache_path();
     let fresh = std::fs::metadata(&path)
         .and_then(|meta| meta.modified())
@@ -54,10 +133,7 @@ pub fn load() -> Result<ColorImage, String> {
         },
     };
     darken(&mut map);
-    Ok(ColorImage::from_rgba_unmultiplied(
-        [map.width() as usize, map.height() as usize],
-        map.as_raw(),
-    ))
+    Ok(map)
 }
 
 fn cache_path() -> PathBuf {

@@ -25,8 +25,11 @@ measurements from the HTML and shows them in a native window. It updates itself 
   today's range or extra detail
 - **Today's statistics:** minimum, maximum and average for each measurement
 - **All-time records:** with the date and time each was set
-- **Map and graphs:** a dark map of Koseze, and the station's temperature and pressure
-  graphs (click the map or a graph to open it in your browser)
+- **Map and graphs:** a dark map of Koseze, from Google Maps when you
+  [set an API key](#google-maps) and from OpenStreetMap otherwise, and the station's
+  temperature and pressure graphs. Click the map to open Google Maps at Koseze in a window
+  of its own (the MeteoCraft window hides to the taskbar widget), or a graph to open it in
+  your browser
 - Automatic refresh every 5 minutes, with a status badge (Live, Updating or Offline),
   a countdown and a manual **Refresh** button
 - A dark theme, and a layout that reflows from several columns down to one as the
@@ -59,6 +62,22 @@ host it, MeteoCraft shows a notification-area icon with the temperature instead.
 11 puts new notification-area icons in the hidden overflow (the **^** arrow); to keep
 that icon visible, drag it out of the overflow, or turn on **MeteoCraft** under
 Settings → Personalization → Taskbar → Other system tray icons.
+
+### Google Maps
+
+The map card shows a Google map when the `METEOCRAFT_GOOGLE_MAPS_KEY` environment
+variable holds a Google Maps Platform API key with the
+[Maps Static API](https://developers.google.com/maps/documentation/maps-static) enabled.
+Google requires a billing account for the key, but the app makes one request each time it
+starts, well within the free monthly usage. On Windows, set the variable for your account
+and restart MeteoCraft:
+
+```sh
+setx METEOCRAFT_GOOGLE_MAPS_KEY "your-api-key"
+```
+
+Without a key the card shows the OpenStreetMap map. If Google rejects the key or can't be
+reached, the card falls back to OpenStreetMap and says why under the map.
 
 ### Starting with Windows
 
@@ -94,7 +113,7 @@ in the tests.
 apps/
   app_window.rs  Opens a web page in a window of its own
   main.rs      App state, background downloads, auto-refresh and the dashboard layout
-  map.rs       The map of Koseze, stitched from OpenStreetMap tiles and darkened
+  map.rs       The map of Koseze, from Google Maps or OpenStreetMap, in a dark style
   sky.rs       The current weather from ARSO's Ljubljana Bežigrad observation
   sky/
     icon.rs    Draws the weather symbols, for both the header and the taskbar
@@ -120,7 +139,10 @@ tests/
 - Downloads run on a background thread so the window stays responsive.
 - The graph images are loaded directly from the station's server by `egui_extras` and
   reloaded whenever new data arrives.
-- The map is built once from [OpenStreetMap](https://www.openstreetmap.org/copyright)
+- With a key, the map is a single Maps Static API image in a dark style set through the
+  API's styling parameters. Google's terms don't allow storing it, so it is downloaded on
+  every start.
+- Otherwise the map is built once from [OpenStreetMap](https://www.openstreetmap.org/copyright)
   tiles and kept in the system's temp folder for 30 days, as the
   [tile usage policy](https://operations.osmfoundation.org/policies/tiles/) asks.
 - `sky::fetch()` reads the cloud cover and weather phenomenon (e.g. `overcast_lightRA`)
@@ -143,7 +165,9 @@ The data comes from a private LaCrosse WS2300 station run by enthusiasts. It is 
 of the official ARSO network and is for information only. All data and images belong to
 the station's operators at [vreme.zajcek.org](https://vreme.zajcek.org/koseze/).
 The current weather comes from the Slovenian Environment Agency
-([ARSO](https://meteo.arso.gov.si/)). Map data is © OpenStreetMap contributors, available under the
+([ARSO](https://meteo.arso.gov.si/)). The Google map is © Google and used under the
+[Google Maps Platform terms](https://cloud.google.com/maps-platform/terms). OpenStreetMap
+map data is © OpenStreetMap contributors, available under the
 [Open Database License](https://www.openstreetmap.org/copyright).
 
 ## License
