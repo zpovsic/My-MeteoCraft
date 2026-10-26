@@ -1,4 +1,5 @@
-//! Notification-area ("system tray") icon that shows the current temperature.
+//! The taskbar widget showing the current weather and temperature, with a
+//! notification-area ("system tray") icon of the temperature as its fallback.
 
 use std::error::Error;
 use std::sync::mpsc::{self, Receiver};
@@ -10,14 +11,17 @@ use tray_icon::{
     BadIcon, Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
 
+use crate::sky::Sky;
 use crate::theme;
 
 mod autostart;
 mod dark_mode;
 mod tooltip;
+mod widget;
 
 pub use autostart::TRAY_ARG;
 use tooltip::Tooltip;
+use widget::Widget;
 
 /// Icon edge in pixels; Windows scales it to the taskbar's DPI.
 const SIZE: usize = 32;
@@ -29,14 +33,20 @@ pub enum Command {
     Quit,
 }
 
-/// What the tray's event handlers report; `ToggleAutostart` is handled by the tray itself.
+/// What the tray's event handlers and the widget report; all but `Command` are
+/// handled by the tray itself.
 enum Event {
     Command(Command),
     ToggleAutostart,
+    /// The widget changed the sign-in setting from its own menu.
+    AutostartChanged,
+    /// Whether the widget is in the taskbar; the tray icon stands in when it isn't.
+    Embedded(bool),
 }
 
 pub struct Tray {
     icon: TrayIcon,
+    widget: Option<Widget>,
     tooltip: Option<Tooltip>,
     font: Option<FontVec>,
     autostart: CheckMenuItem,
@@ -93,6 +103,14 @@ impl Tray {
             tooltip.set_text("MeteoCraft – loading…");
         }
         let tip = tooltip.as_ref().map(Tooltip::handle);
+        let (widget_tx, widget_ctx) = (tx.clone(), ctx.clone());
+        let widget = Widget::spawn(
+            move |event| {
+                let _ = widget_tx.send(event);
+                widget_ctx.request_repaint();
+            },
+            tip,
+        );
         let click_ctx = ctx.clone();
         TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| match event {
             TrayIconEvent::Enter { rect, .. } | TrayIconEvent::Move { rect, .. } => {
@@ -135,6 +153,7 @@ impl Tray {
 
         Ok(Self {
             icon,
+            widget,
             tooltip,
             font,
             autostart,
@@ -142,9 +161,12 @@ impl Tray {
         })
     }
 
-    pub fn update(&self, celsius: Option<f32>, tooltip: &str) {
+    pub fn update(&self, celsius: Option<f32>, sky: Option<&Sky>, tooltip: &str) {
         if let Ok(icon) = render(self.font.as_ref(), celsius) {
             let _ = self.icon.set_icon(Some(icon));
+        }
+        if let Some(widget) = &self.widget {
+            widget.update(celsius, sky);
         }
         if let Some(tip) = &self.tooltip {
             tip.set_text(tooltip);
@@ -162,25 +184,36 @@ impl Tray {
                     }
                     self.autostart.set_checked(autostart::is_enabled());
                 }
+                Event::AutostartChanged => self.autostart.set_checked(autostart::is_enabled()),
+                Event::Embedded(embedded) => {
+                    let _ = self.icon.set_visible(!embedded);
+                }
             }
         }
     }
 }
 
-fn render(font: Option<&FontVec>, celsius: Option<f32>) -> Result<Icon, BadIcon> {
-    let (text, color) = match celsius {
+/// The temperature as shown on the taskbar, e.g. "8°", in its color.
+fn temperature_label(celsius: Option<f32>) -> (String, Color32) {
+    match celsius {
         Some(t) => (
             format!("{}°", t.round() as i32),
             theme::temperature_color(t),
         ),
         None => ("--".to_owned(), theme::MUTED),
-    };
+    }
+}
+
+fn render(font: Option<&FontVec>, celsius: Option<f32>) -> Result<Icon, BadIcon> {
+    let (text, color) = temperature_label(celsius);
     let mut coverage = vec![0.0_f32; SIZE * SIZE];
     match font {
         Some(font) => draw_text(font, &text, &mut coverage),
         None => draw_disk(&mut coverage),
     }
-    Icon::from_rgba(compose(&coverage, color), SIZE as u32, SIZE as u32)
+    let mut rgba = vec![0_u8; SIZE * SIZE * 4];
+    paint_text(&mut rgba, &coverage, SIZE, color);
+    Icon::from_rgba(rgba, SIZE as u32, SIZE as u32)
 }
 
 /// Draws `text` as large as fits, centered. Drops the degree sign if keeping it
@@ -195,7 +228,7 @@ fn draw_text(font: &FontVec, text: &str, coverage: &mut [f32]) {
     let mut text = text;
     let mut scale = fit(text);
     let digits_only = text.trim_end_matches('°');
-    if scale < 30.0 && digits_only != text {
+    if scale < usable && digits_only != text {
         text = digits_only;
         scale = fit(text);
     }
@@ -206,13 +239,19 @@ fn draw_text(font: &FontVec, text: &str, coverage: &mut [f32]) {
     };
     let dx = ((SIZE as f32 - bounds.width()) / 2.0 - bounds.min.x).round();
     let dy = ((SIZE as f32 - bounds.height()) / 2.0 - bounds.min.y).round();
-    for glyph in &glyphs {
+    stamp(&glyphs, (dx, dy), coverage, SIZE);
+}
+
+/// Adds the glyphs, offset by `at`, to a coverage map `width` pixels wide.
+fn stamp(glyphs: &[OutlinedGlyph], at: (f32, f32), coverage: &mut [f32], width: usize) {
+    let height = coverage.len() / width;
+    for glyph in glyphs {
         let b = glyph.px_bounds();
         glyph.draw(|x, y, c| {
-            let px = (b.min.x + dx) as i32 + x as i32;
-            let py = (b.min.y + dy) as i32 + y as i32;
-            if (0..SIZE as i32).contains(&px) && (0..SIZE as i32).contains(&py) {
-                let cell = &mut coverage[py as usize * SIZE + px as usize];
+            let px = (b.min.x + at.0) as i32 + x as i32;
+            let py = (b.min.y + at.1) as i32 + y as i32;
+            if (0..width as i32).contains(&px) && (0..height as i32).contains(&py) {
+                let cell = &mut coverage[py as usize * width + px as usize];
                 *cell = cell.max(c);
             }
         });
@@ -262,41 +301,42 @@ fn draw_disk(coverage: &mut [f32]) {
     }
 }
 
-/// Text in `color` over a 1 px dark outline, so it reads on light and dark taskbars.
-fn compose(coverage: &[f32], color: Color32) -> Vec<u8> {
+/// Paints text in `color` over a 1 px dark outline onto `rgba` (unpremultiplied,
+/// `width` pixels wide), so it reads on light and dark taskbars.
+fn paint_text(rgba: &mut [u8], coverage: &[f32], width: usize, color: Color32) {
+    let (w, h) = (width as i32, (coverage.len() / width) as i32);
     let at = |x: i32, y: i32| {
-        if (0..SIZE as i32).contains(&x) && (0..SIZE as i32).contains(&y) {
-            coverage[y as usize * SIZE + x as usize]
+        if (0..w).contains(&x) && (0..h).contains(&y) {
+            coverage[(y * w + x) as usize]
         } else {
             0.0
         }
     };
-    let mut rgba = Vec::with_capacity(SIZE * SIZE * 4);
-    for y in 0..SIZE as i32 {
-        for x in 0..SIZE as i32 {
+    for y in 0..h {
+        for x in 0..w {
             let text = at(x, y);
             let halo = (-1..=1)
                 .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
                 .map(|(dx, dy)| at(x + dx, y + dy))
                 .fold(0.0, f32::max)
                 * 0.9;
-            let alpha = text + halo * (1.0 - text);
-            let mix = |fg: u8, bg: u8| {
-                if alpha <= 0.0 {
-                    0
-                } else {
-                    ((fg as f32 * text + bg as f32 * halo * (1.0 - text)) / alpha).round() as u8
-                }
-            };
-            rgba.extend([
-                mix(color.r(), HALO.r()),
-                mix(color.g(), HALO.g()),
-                mix(color.b(), HALO.b()),
-                (alpha * 255.0).round() as u8,
-            ]);
+            let pixel = &mut rgba[((y * w + x) * 4) as usize..][..4];
+            over(pixel, HALO, halo * (1.0 - text));
+            over(pixel, color, text);
         }
     }
-    rgba
+}
+
+fn over(pixel: &mut [u8], color: Color32, alpha: f32) {
+    if alpha <= 0.0 {
+        return;
+    }
+    let below = f32::from(pixel[3]) / 255.0 * (1.0 - alpha);
+    let total = alpha + below;
+    for (channel, value) in pixel.iter_mut().zip([color.r(), color.g(), color.b()]) {
+        *channel = ((f32::from(value) * alpha + f32::from(*channel) * below) / total).round() as u8;
+    }
+    pixel[3] = (total * 255.0).round() as u8;
 }
 
 #[cfg(test)]

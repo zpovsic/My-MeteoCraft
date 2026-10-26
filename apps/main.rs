@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod map;
+mod sky;
 mod station;
 mod theme;
 #[cfg(windows)]
@@ -10,8 +11,11 @@ mod widgets;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Margin, RichText, Sense, Stroke, Vec2, ViewportCommand};
+use eframe::egui::{
+    self, FontId, Margin, Pos2, Rect, RichText, Sense, Stroke, Vec2, ViewportCommand,
+};
 
+use sky::Sky;
 use station::{FetchError, StationData};
 use widgets::{CardFn, caption, card_title, muted};
 
@@ -19,6 +23,9 @@ use widgets::{CardFn, caption, card_title, muted};
 const REFRESH_INTERVAL: Duration = Duration::from_secs(300);
 /// Until the first download succeeds (e.g. the network isn't up yet right after sign-in).
 const RETRY_INTERVAL: Duration = Duration::from_secs(30);
+/// The weather symbol in the header, in points, and the resolution it is drawn at.
+const SKY_ICON_SIZE: f32 = 54.0;
+const SKY_ICON_PIXELS: usize = 160;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -46,6 +53,10 @@ struct MeteoApp {
     pending: Option<Receiver<Result<StationData, FetchError>>>,
     last_fetch: Instant,
     map: Map,
+    sky: Option<(Sky, egui::TextureHandle)>,
+    sky_pending: Option<Receiver<Result<Sky, String>>>,
+    /// When the last successful sky observation was requested.
+    sky_fetched: Option<Instant>,
     #[cfg(windows)]
     tray: Option<tray::Tray>,
     /// Set when the user picks Quit, so closing the window really exits.
@@ -85,6 +96,9 @@ impl MeteoApp {
             error: None,
             pending: None,
             last_fetch: Instant::now(),
+            sky: None,
+            sky_pending: None,
+            sky_fetched: None,
             quitting: false,
             #[cfg(windows)]
             start_in_tray: std::env::args().any(|arg| arg == tray::TRAY_ARG),
@@ -127,14 +141,15 @@ impl MeteoApp {
                 .data
                 .as_ref()
                 .and_then(|d| number(value_of(d.reading("temperatura"))));
+            let sky = self.sky.as_ref().map(|(sky, _)| sky);
             let mut tooltip = self
                 .data
                 .as_ref()
-                .map_or_else(|| "MeteoCraft".to_owned(), tray_summary);
+                .map_or_else(|| "MeteoCraft".to_owned(), |d| tray_summary(d, sky));
             if self.error.is_some() {
                 tooltip.push_str("\nOffline – showing the last data received");
             }
-            tray.update(temp, &tooltip);
+            tray.update(temp, sky, &tooltip);
         }
     }
 
@@ -158,6 +173,48 @@ impl MeteoApp {
         });
         self.pending = Some(rx);
         self.last_fetch = Instant::now();
+
+        let sky_due = self
+            .sky_fetched
+            .is_none_or(|at| at.elapsed() >= sky::PICKUP_PERIOD);
+        if self.sky_pending.is_none() && sky_due {
+            let (tx, rx) = mpsc::channel();
+            let ctx = self.ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(sky::fetch());
+                ctx.request_repaint();
+            });
+            self.sky_pending = Some(rx);
+            self.sky_fetched = Some(Instant::now());
+        }
+    }
+
+    fn poll_sky(&mut self) {
+        let Some(rx) = &self.sky_pending else { return };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("download thread stopped unexpectedly".into()),
+        };
+        self.sky_pending = None;
+        match result {
+            Ok(sky) => {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [SKY_ICON_PIXELS; 2],
+                    &sky::icon::render(&sky, SKY_ICON_PIXELS, 3.0),
+                );
+                let texture =
+                    self.ctx
+                        .load_texture("sky-icon", image, egui::TextureOptions::LINEAR);
+                self.sky = Some((sky, texture));
+                self.update_tray();
+            }
+            Err(e) => {
+                // Keep the last observation and try again with the next refresh.
+                eprintln!("sky observation unavailable: {e}");
+                self.sky_fetched = None;
+            }
+        }
     }
 
     fn poll_fetch(&mut self) {
@@ -211,7 +268,10 @@ impl MeteoApp {
         );
 
         if ui.available_width() < 720.0 {
-            self.title_block(ui);
+            ui.horizontal(|ui| {
+                let title = self.title_block(ui);
+                self.sky_badge(ui, rect.center().x, title.center().y);
+            });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 self.status(ui);
@@ -220,17 +280,69 @@ impl MeteoApp {
             });
         } else {
             ui.horizontal(|ui| {
-                self.title_block(ui);
+                let title = self.title_block(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.refresh_button(ui);
                     self.countdown(ui);
                     self.status(ui);
+                    self.sky_badge(ui, rect.center().x, title.center().y);
                 });
             });
         }
     }
 
-    fn title_block(&self, ui: &mut egui::Ui) {
+    /// The weather symbol and its description, centered on `center_x` as far as the
+    /// space left between the header's other parts allows.
+    fn sky_badge(&self, ui: &mut egui::Ui, center_x: f32, center_y: f32) {
+        let Some((sky, texture)) = &self.sky else {
+            return;
+        };
+        const GAP: f32 = 10.0;
+        const MARGIN: f32 = 16.0;
+        let painter = ui.painter();
+        let title = painter.layout_no_wrap(
+            sky.description.clone(),
+            FontId::proportional(19.0),
+            theme::TEXT,
+        );
+        let source = painter.layout_no_wrap(
+            format!("{} · {}", sky::SOURCE, sky.observed),
+            FontId::proportional(12.0),
+            theme::MUTED,
+        );
+        let text_width = title.size().x.max(source.size().x);
+
+        let free = ui
+            .available_rect_before_wrap()
+            .shrink2(Vec2::new(MARGIN, 0.0));
+        let with_text = SKY_ICON_SIZE + GAP + text_width;
+        let width = if free.width() >= with_text {
+            with_text
+        } else if free.width() >= SKY_ICON_SIZE {
+            SKY_ICON_SIZE
+        } else {
+            return;
+        };
+        let x = center_x.clamp(free.left() + width / 2.0, free.right() - width / 2.0);
+        let badge = Rect::from_center_size(Pos2::new(x, center_y), Vec2::new(width, SKY_ICON_SIZE));
+
+        let icon = Rect::from_min_size(badge.min, Vec2::splat(SKY_ICON_SIZE));
+        egui::Image::new((texture.id(), icon.size())).paint_at(ui, icon);
+        if width == with_text {
+            let top = badge.center().y - (title.size().y + source.size().y) / 2.0;
+            let left = icon.right() + GAP;
+            let painter = ui.painter();
+            painter.galley(Pos2::new(left, top), title.clone(), theme::TEXT);
+            painter.galley(Pos2::new(left, top + title.size().y), source, theme::MUTED);
+        }
+        ui.interact(badge, ui.scope_id().with("sky-badge"), Sense::hover())
+            .on_hover_text(format!(
+                "{} – observed by ARSO at Ljubljana Bežigrad, about 3 km east of Koseze, at {}",
+                sky.description, sky.observed
+            ));
+    }
+
+    fn title_block(&self, ui: &mut egui::Ui) -> Rect {
         ui.vertical(|ui| {
             ui.label(
                 RichText::new("☁  METEOCRAFT")
@@ -252,7 +364,9 @@ impl MeteoApp {
                 None => "Weather station".to_owned(),
             };
             ui.label(muted(subtitle).size(13.5));
-        });
+        })
+        .response
+        .rect
     }
 
     fn status(&self, ui: &mut egui::Ui) {
@@ -319,6 +433,7 @@ impl eframe::App for MeteoApp {
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         }
         self.poll_fetch();
+        self.poll_sky();
         self.poll_map();
         if self.last_fetch.elapsed() >= self.refresh_interval() {
             self.refresh();
@@ -702,7 +817,7 @@ fn image_card(ui: &mut egui::Ui, icon: &str, title: &str, path: &str) {
 
 /// Tray tooltip, e.g. "Ljubljana Koseze: 8.5 °C / Humidity 87% · wind 0.0 km/h WNW / …".
 #[cfg(windows)]
-fn tray_summary(data: &StationData) -> String {
+fn tray_summary(data: &StationData, sky: Option<&Sky>) -> String {
     let wind = match data.wind.speed_kmh {
         Some(kmh) => format!(
             "{kmh:.1} km/h {}",
@@ -714,8 +829,9 @@ fn tray_summary(data: &StationData) -> String {
         ),
         None => data.wind.speed.clone(),
     };
+    let sky = sky.map_or_else(String::new, |sky| format!(" · {}", sky.description));
     format!(
-        "Ljubljana Koseze: {}\nHumidity {} · wind {wind}\nMeasured {}",
+        "Ljubljana Koseze: {}{sky}\nHumidity {} · wind {wind}\nMeasured {}",
         value_of(data.reading("temperatura")),
         value_of(data.reading("vlažnost")),
         data.last_measurement.replace(" ob ", " at "),

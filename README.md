@@ -9,6 +9,10 @@ measurements from the HTML and shows them in a native window. It updates itself 
 
 ## Features
 
+- **Current weather:** a symbol (sun or moon, clouds, rain, snow, fog, thunderstorm) and
+  a description such as "Partly cloudy" or "Light rain" in the middle of the header. The
+  Koseze station doesn't observe the sky, so this comes from the official ARSO
+  observation at Ljubljana Bežigrad, about 3 km east
 - **Now:** the current temperature, colored from icy blue to hot red, a plain-English
   summary such as "Cool and humid", wind chill, dew point, and a bar showing where the
   current temperature sits within today's range
@@ -24,12 +28,12 @@ measurements from the HTML and shows them in a native window. It updates itself 
   a countdown and a manual **Refresh** button
 - A dark theme, and a layout that reflows from several columns down to one as the
   window gets narrower
-- **Taskbar widget (Windows):** a notification-area icon showing the current temperature
-  in its color, with a tooltip summarizing the latest reading. The tooltip and the menu
-  follow the taskbar's light or dark theme. Click the icon to open the
-  window; right-click it for **Open MeteoCraft**, **Refresh now**, **Start with Windows**
-  and **Quit**. Closing the window hides it to the icon and the app keeps refreshing; use
-  **Quit** to exit.
+- **Taskbar widget (Windows):** the current weather symbol and, beside it, the current
+  temperature in its color, embedded in the taskbar just left of the notification area,
+  with a tooltip summarizing the latest reading. The tooltip and the menu follow the
+  taskbar's light or dark theme. Click the widget to open the window; right-click it for
+  **Open MeteoCraft**, **Refresh now**, **Start with Windows** and **Quit**. Closing the
+  window hides it to the widget and the app keeps refreshing; use **Quit** to exit.
 
 The website is in Slovenian; the app shows everything in English.
 
@@ -47,16 +51,18 @@ cargo run --release
 The executable is written to `target/release/meteocraft` (`meteocraft.exe` on Windows).
 Release builds on Windows open without a console window.
 
-Windows 11 puts new notification-area icons in the hidden overflow (the **^** arrow).
-To keep the temperature visible on the taskbar, drag the icon out of the overflow, or
-turn on **MeteoCraft** under Settings → Personalization → Taskbar → Other system tray icons.
+The widget sits on a horizontal taskbar. On a vertical taskbar, or if the taskbar can't
+host it, MeteoCraft shows a notification-area icon with the temperature instead. Windows
+11 puts new notification-area icons in the hidden overflow (the **^** arrow); to keep
+that icon visible, drag it out of the overflow, or turn on **MeteoCraft** under
+Settings → Personalization → Taskbar → Other system tray icons.
 
 ### Starting with Windows
 
 Check **Start with Windows** in the icon's menu to start MeteoCraft when you sign in. It
 adds a `MeteoCraft` entry under
 `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run` that runs the current
-executable with `--tray`, so it starts hidden in the notification area. Until the first
+executable with `--tray`, so it starts with only the taskbar widget. Until the first
 download succeeds (the network may still be connecting), it retries every 30 seconds.
 Uncheck the item to remove the entry.
 
@@ -73,8 +79,9 @@ meteocraft --tray
 cargo test
 ```
 
-The parser tests run against a saved copy of the station page in
-`tests/fixtures/koseze.html`, so they don't need network access. If the website's layout
+The parser tests run against saved copies of the station page in
+`tests/fixtures/koseze.html` and of the ARSO observation in
+`tests/fixtures/arso-bezigrad.xml`, so they don't need network access. If the website's layout
 changes, download a fresh copy of the page into that file and update the expected values
 in the tests.
 
@@ -84,17 +91,22 @@ in the tests.
 apps/
   main.rs      App state, background downloads, auto-refresh and the dashboard layout
   map.rs       The map of Koseze, stitched from OpenStreetMap tiles and darkened
+  sky.rs       The current weather from ARSO's Ljubljana Bežigrad observation
+  sky/
+    icon.rs    Draws the weather symbols, for both the header and the taskbar
   station.rs   Downloading and parsing the station page
   theme.rs     Color palette, egui styling and the temperature color scale
-  tray.rs      Windows notification-area icon that draws the temperature and its menu
+  tray.rs      The taskbar presence: widget, fallback notification-area icon and menu
   tray/
     autostart.rs  The "Start with Windows" entry in the registry's Run key
-    dark_mode.rs  Reads the taskbar theme and applies it to the tray menu
-    tooltip.rs    The icon's hover tooltip, drawn by the app to match the theme
+    dark_mode.rs  Reads the taskbar theme and applies it to the menus
+    tooltip.rs    The hover tooltip, drawn by the app to match the theme
+    widget.rs     The weather symbol and temperature embedded in the taskbar
   widgets.rs   Cards, responsive card rows, status badge, compass and temperature bar
 tests/
   fixtures/
-    koseze.html  Saved copy of the station page used by the tests
+    arso-bezigrad.xml  Saved ARSO observation used by the tests
+    koseze.html        Saved copy of the station page used by the tests
 ```
 
 ## How it works
@@ -107,6 +119,14 @@ tests/
 - The map is built once from [OpenStreetMap](https://www.openstreetmap.org/copyright)
   tiles and kept in the system's temp folder for 30 days, as the
   [tile usage policy](https://operations.osmfoundation.org/policies/tiles/) asks.
+- `sky::fetch()` reads the cloud cover and weather phenomenon (e.g. `overcast_lightRA`)
+  from ARSO's [observation feed](https://meteo.arso.gov.si/uploads/meteo/help/sl/xml_service.html),
+  at most every 10 minutes as ARSO publishes it, and uses the sunrise and sunset in the
+  same feed to choose a sun or a moon. The symbols are drawn by the app from simple
+  shapes, so they look the same in the header and in the taskbar.
+- The taskbar widget is a layered child window of the taskbar, drawn by the app on its own
+  thread. It follows the notification area as it grows or shrinks, and comes back when
+  Explorer restarts.
 - Labels are parsed in Slovenian, as they appear on the website, and translated for display
   by `english()` in `apps/main.rs`. A label that has no translation is shown in Slovenian,
   and a test fails if any label on the saved page is missing a translation.
@@ -118,7 +138,8 @@ tests/
 The data comes from a private LaCrosse WS2300 station run by enthusiasts. It is not part
 of the official ARSO network and is for information only. All data and images belong to
 the station's operators at [vreme.zajcek.org](https://vreme.zajcek.org/koseze/).
-Map data is © OpenStreetMap contributors, available under the
+The current weather comes from the Slovenian Environment Agency
+([ARSO](https://meteo.arso.gov.si/)). Map data is © OpenStreetMap contributors, available under the
 [Open Database License](https://www.openstreetmap.org/copyright).
 
 ## License
