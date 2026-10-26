@@ -33,7 +33,11 @@ measurements from the HTML and shows them in a native window. It updates itself 
   temperature (with wind chill and heat index where they differ), air pressure and
   humidity. Each shows its low and high, and hovering shows the values at that time
   on every chart. The station publishes this history only as graph images, so the app
-  reads the values out of them
+  reads the values out of them. The window reopens where you last left it, at the same
+  size
+- **Alerts (Windows):** a notification when frost, wind, rain or falling pressure begins.
+  Choose which ones under **Alerts** in the header, and send a test notification from the
+  same menu. Click a notification to open the window. See [Alerts](#alerts) for the rules
 - Automatic refresh every 5 minutes, with a status badge (Live, Updating or Offline),
   a countdown and a manual **Refresh** button
 - A dark theme, and a layout that reflows from several columns down to one as the
@@ -99,6 +103,26 @@ program, check the item again from the new copy. You can run it the same way by 
 meteocraft --tray
 ```
 
+### Alerts
+
+MeteoCraft checks each new measurement and notifies you when:
+
+| Alert | Notifies when | Can notify again once |
+|---|---|---|
+| Frost | the temperature drops to 0 °C or below | it is back to 1 °C or above |
+| Wind | the wind reaches 29 km/h, a fresh breeze | it is below 20 km/h |
+| Rain | any rain falls in the last hour | an hour passes without rain |
+| Falling pressure | the pressure falls 3 hPa or more within 3 hours | the fall is under 1.5 hPa |
+
+The station reports only the average wind, not gusts. The first measurement after the
+app starts is never an alert, so conditions that already hold don't notify you. Alerts
+come only while MeteoCraft is running, including when only the taskbar widget is showing.
+
+### Settings
+
+Which alerts are on, the position of the windows and the charts window's size are saved
+in `%APPDATA%\MeteoCraft\data\app.ron`.
+
 ## Testing
 
 ```sh
@@ -116,6 +140,7 @@ the three graph images.
 
 ```text
 apps/
+  alerts.rs    Decides when the weather is worth a notification
   app_window.rs  Opens a web page in a window of its own
   charts.rs    The "Last 24 hours" charts
   history.rs   The last 24 hours of measurements, read from the station's graphs
@@ -123,6 +148,7 @@ apps/
     digitize.rs  Reads the axes and lines of an RRDtool graph image
   main.rs      App state, background downloads, auto-refresh and the dashboard layout
   map.rs       The map of Koseze, from Google Maps or OpenStreetMap, in a dark style
+  notify.rs    Shows Windows notifications under MeteoCraft's name and icon
   sky.rs       The current weather from ARSO's Ljubljana Bežigrad observation
   sky/
     icon.rs    Draws the weather symbols, for both the header and the taskbar
@@ -171,6 +197,9 @@ tests/
 - The taskbar widget is a layered child window of the taskbar, drawn by the app on its own
   thread. It follows the notification area as it grows or shrinks, and comes back when
   Explorer restarts.
+- Notifications are Windows toasts. So they show MeteoCraft's name and icon, the app
+  registers itself under `HKEY_CURRENT_USER\Software\Classes\AppUserModelId\MeteoCraft`
+  and saves the icon in `%LOCALAPPDATA%\MeteoCraft`.
 - Labels are parsed in Slovenian, as they appear on the website, and translated for display
   by `english()` in `apps/main.rs`. A label that has no translation is shown in Slovenian,
   and a test fails if any label on the saved page is missing a translation.
