@@ -12,9 +12,9 @@ use image::RgbaImage;
 pub const GOOGLE_KEY_VARIABLE: &str = "METEOCRAFT_GOOGLE_MAPS_KEY";
 const OSM_ATTRIBUTION: &str = "© OpenStreetMap contributors";
 /// The Koseze quarter as placed by OpenStreetMap; the station's exact position isn't published.
-const CENTER: (f64, f64) = (46.07134, 14.46956);
+pub const CENTER: (f64, f64) = (46.07134, 14.46956);
 const ZOOM: u32 = 15;
-const TILE: u32 = 256;
+pub const TILE: u32 = 256;
 /// Map size in pixels; wide like the station's graphs next to it.
 const SIZE: [u32; 2] = [768, 384];
 /// The largest size the Static API serves, drawn at twice the resolution.
@@ -34,7 +34,7 @@ const GOOGLE_STYLE: &[&str] = &[
 ];
 /// OpenStreetMap's tile policy asks clients to cache, and the streets rarely change.
 const MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-const USER_AGENT: &str = concat!(
+pub const USER_AGENT: &str = concat!(
     "meteocraft/",
     env!("CARGO_PKG_VERSION"),
     " (",
@@ -42,7 +42,7 @@ const USER_AGENT: &str = concat!(
     ")"
 );
 
-type BoxError = Box<dyn Error + Send + Sync>;
+pub type BoxError = Box<dyn Error + Send + Sync>;
 
 pub struct Map {
     pub image: ColorImage,
@@ -72,13 +72,18 @@ pub fn load() -> Result<Map, String> {
             Err(e) => attribution.push_str(&format!(" · Google Maps unavailable: {e}")),
         }
     }
+    let (x, y) = world_pixel(CENTER.0, CENTER.1, ZOOM);
+    let origin = (
+        (x - f64::from(SIZE[0]) / 2.0).round() as i64,
+        (y - f64::from(SIZE[1]) / 2.0).round() as i64,
+    );
     Ok(Map {
-        image: color_image(&load_osm()?),
+        image: color_image(&dark_osm(ZOOM, origin, SIZE)?),
         attribution,
     })
 }
 
-fn color_image(map: &RgbaImage) -> ColorImage {
+pub fn color_image(map: &RgbaImage) -> ColorImage {
     ColorImage::from_rgba_unmultiplied([map.width() as usize, map.height() as usize], map.as_raw())
 }
 
@@ -111,9 +116,10 @@ fn download_google(key: &str) -> Result<RgbaImage, BoxError> {
     Ok(image::load_from_memory(&bytes)?.to_rgba8())
 }
 
-/// Loads the OpenStreetMap map from the cache, downloading it when missing or stale.
-fn load_osm() -> Result<RgbaImage, String> {
-    let path = cache_path();
+/// Darkened OpenStreetMap: `size` pixels from `origin` on the world map at `zoom`.
+/// It comes from the cache, downloaded when missing or stale.
+pub fn dark_osm(zoom: u32, origin: (i64, i64), size: [u32; 2]) -> Result<RgbaImage, String> {
+    let path = cache_path(zoom, origin, size);
     let fresh = std::fs::metadata(&path)
         .and_then(|meta| meta.modified())
         .ok()
@@ -123,7 +129,7 @@ fn load_osm() -> Result<RgbaImage, String> {
 
     let mut map = match fresh.then(cached).and_then(Result::ok) {
         Some(map) => map,
-        None => match download() {
+        None => match download(zoom, origin, size) {
             Ok(map) => {
                 let _ = map.save(&path);
                 map
@@ -136,39 +142,34 @@ fn load_osm() -> Result<RgbaImage, String> {
     Ok(map)
 }
 
-fn cache_path() -> PathBuf {
+fn cache_path(zoom: u32, (left, top): (i64, i64), [width, height]: [u32; 2]) -> PathBuf {
     std::env::temp_dir().join(format!(
-        "meteocraft-map-osm-{ZOOM}-{}x{}.png",
-        SIZE[0], SIZE[1]
+        "meteocraft-map-osm-{zoom}-{left}-{top}-{width}x{height}.png"
     ))
 }
 
 /// Position in pixels on the Web Mercator world map made of `TILE`-sized tiles.
-fn world_pixel(lat: f64, lon: f64, zoom: u32) -> (f64, f64) {
+pub fn world_pixel(lat: f64, lon: f64, zoom: u32) -> (f64, f64) {
     let scale = f64::from(TILE) * f64::from(1_u32 << zoom);
     let x = (lon + 180.0) / 360.0 * scale;
     let y = (1.0 - lat.to_radians().tan().asinh() / std::f64::consts::PI) / 2.0 * scale;
     (x, y)
 }
 
-fn download() -> Result<RgbaImage, BoxError> {
-    let (cx, cy) = world_pixel(CENTER.0, CENTER.1, ZOOM);
-    let left = (cx - f64::from(SIZE[0]) / 2.0).round() as i64;
-    let top = (cy - f64::from(SIZE[1]) / 2.0).round() as i64;
+fn download(zoom: u32, (left, top): (i64, i64), size: [u32; 2]) -> Result<RgbaImage, BoxError> {
     let tile = i64::from(TILE);
-
-    let mut map = RgbaImage::new(SIZE[0], SIZE[1]);
-    for y in top.div_euclid(tile)..=(top + i64::from(SIZE[1]) - 1).div_euclid(tile) {
-        for x in left.div_euclid(tile)..=(left + i64::from(SIZE[0]) - 1).div_euclid(tile) {
-            let piece = fetch_tile(x, y)?;
+    let mut map = RgbaImage::new(size[0], size[1]);
+    for y in top.div_euclid(tile)..=(top + i64::from(size[1]) - 1).div_euclid(tile) {
+        for x in left.div_euclid(tile)..=(left + i64::from(size[0]) - 1).div_euclid(tile) {
+            let piece = fetch_tile(zoom, x, y)?;
             image::imageops::replace(&mut map, &piece, x * tile - left, y * tile - top);
         }
     }
     Ok(map)
 }
 
-fn fetch_tile(x: i64, y: i64) -> Result<RgbaImage, BoxError> {
-    let url = format!("https://tile.openstreetmap.org/{ZOOM}/{x}/{y}.png");
+fn fetch_tile(zoom: u32, x: i64, y: i64) -> Result<RgbaImage, BoxError> {
+    let url = format!("https://tile.openstreetmap.org/{zoom}/{x}/{y}.png");
     let mut response = ureq::get(&url).header("User-Agent", USER_AGENT).call()?;
     let bytes = response.body_mut().read_to_vec()?;
     let tile = image::load_from_memory(&bytes)?.to_rgba8();

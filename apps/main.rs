@@ -12,6 +12,7 @@ mod station;
 mod theme;
 #[cfg(windows)]
 mod tray;
+mod weather_map;
 mod widgets;
 
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -35,6 +36,9 @@ const SKY_ICON_PIXELS: usize = 160;
 /// Keys of the settings eframe saves between runs.
 const ALERTS_KEY: &str = "alerts";
 const CHARTS_PLACEMENT_KEY: &str = "charts-window";
+const WEATHER_PLACEMENT_KEY: &str = "weather-window";
+/// The map is twice as wide as it is tall, with the controls below it.
+const WEATHER_WINDOW_SIZE: Vec2 = egui::vec2(1100.0, 760.0);
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -97,6 +101,11 @@ struct MeteoApp {
     charts: Option<ChartsWindow>,
     /// Where the charts window was last, to open it there again.
     charts_placement: Option<Placement>,
+    /// Clouds and rain around Slovenia, on a card and in a window of their own.
+    weather: weather_map::WeatherMap,
+    /// Set while the clouds and radar window is open.
+    weather_window: Option<Opening>,
+    weather_placement: Option<Placement>,
     alerts: alerts::Watch,
     /// Sent when a notification is clicked, from whichever thread Windows reports it on.
     alert_clicks: (Sender<()>, Receiver<()>),
@@ -150,42 +159,99 @@ impl Placement {
     }
 }
 
+/// Where one of the app's other windows opens.
+#[derive(Debug, Clone, Copy)]
+struct Opening {
+    size: Vec2,
+    position: Option<Pos2>,
+}
+
+impl Opening {
+    /// Leaves room for the title bar and the taskbar.
+    const SCREEN_MARGIN: f32 = 140.0;
+
+    /// Where the window was last if that is still on screen, otherwise centered at `size`
+    /// or as much of it as fits.
+    fn new(last: Option<Placement>, size: Vec2, ctx: &egui::Context) -> Self {
+        match last {
+            Some(last) if last.is_on_screen(ctx.pixels_per_point()) => Self {
+                size: last.size,
+                position: Some(last.position),
+            },
+            _ => {
+                let monitor = ctx.input(|i| i.viewport().monitor_size);
+                let size = match monitor {
+                    Some(monitor) => size.min(monitor - Vec2::splat(Self::SCREEN_MARGIN)),
+                    None => size,
+                };
+                Self {
+                    size,
+                    position: monitor.map(|monitor| ((monitor - size) / 2.0).max(Vec2::ZERO).to_pos2()),
+                }
+            }
+        }
+    }
+
+    /// Shows the window for this frame. Returns whether it was asked to close, and where
+    /// it is if that is worth reopening at.
+    fn show(
+        self,
+        ctx: &egui::Context,
+        id: egui::ViewportId,
+        title: &str,
+        min_size: Vec2,
+        mut add_contents: impl FnMut(&mut egui::Ui),
+    ) -> (bool, Option<Placement>) {
+        let mut builder = egui::ViewportBuilder::default()
+            .with_title(title)
+            .with_inner_size(self.size)
+            .with_min_inner_size(min_size);
+        if let Some(position) = self.position {
+            builder = builder.with_position(position);
+        }
+        ctx.show_viewport_immediate(id, builder, |ui, _| {
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::BG)
+                        .inner_margin(Margin::symmetric(24, 18)),
+                )
+                .show(ui, &mut add_contents);
+            ui.input(|i| {
+                let viewport = i.viewport();
+                // A minimized or maximized window has no position worth reopening at.
+                let normal = viewport.minimized != Some(true) && viewport.maximized != Some(true);
+                let placement = viewport
+                    .outer_rect
+                    .zip(viewport.inner_rect)
+                    .filter(|_| normal)
+                    .map(|(outer, inner)| Placement {
+                        position: outer.min,
+                        size: inner.size(),
+                    });
+                (viewport.close_requested(), placement)
+            })
+        })
+    }
+}
+
 struct ChartsWindow {
     history: Option<history::History>,
     error: Option<String>,
     pending: Option<Receiver<Result<history::History, String>>>,
-    size: egui::Vec2,
-    position: Option<egui::Pos2>,
+    opening: Opening,
 }
 
 impl ChartsWindow {
     /// Tall enough to show all the charts without scrolling.
-    const SIZE: egui::Vec2 = egui::vec2(1060.0, 1060.0);
-    /// Leaves room for the title bar and the taskbar.
-    const SCREEN_MARGIN: f32 = 140.0;
+    const SIZE: Vec2 = egui::vec2(1060.0, 1060.0);
 
-    /// Opens where the window was last if that is still on screen, otherwise centered.
-    fn new(last: Option<Placement>, monitor: Option<egui::Vec2>, pixels_per_point: f32) -> Self {
-        let (size, position) = match last {
-            Some(last) if last.is_on_screen(pixels_per_point) => (last.size, Some(last.position)),
-            _ => {
-                let size = match monitor {
-                    Some(monitor) => {
-                        Self::SIZE.min(monitor - egui::Vec2::splat(Self::SCREEN_MARGIN))
-                    }
-                    None => Self::SIZE,
-                };
-                let centered =
-                    monitor.map(|monitor| ((monitor - size) / 2.0).max(egui::Vec2::ZERO).to_pos2());
-                (size, centered)
-            }
-        };
+    fn new(last: Option<Placement>, ctx: &egui::Context) -> Self {
         Self {
             history: None,
             error: None,
             pending: None,
-            size,
-            position,
+            opening: Opening::new(last, Self::SIZE, ctx),
         }
     }
 
@@ -313,6 +379,11 @@ impl MeteoApp {
             start_in_tray: false,
             charts: None,
             charts_placement: saved(CHARTS_PLACEMENT_KEY)
+                .as_deref()
+                .and_then(Placement::parse),
+            weather: weather_map::WeatherMap::new(),
+            weather_window: None,
+            weather_placement: saved(WEATHER_PLACEMENT_KEY)
                 .as_deref()
                 .and_then(Placement::parse),
             alerts: alerts::Watch::new(saved(ALERTS_KEY).as_deref()),
@@ -718,9 +789,16 @@ impl eframe::App for MeteoApp {
         {
             self.open_charts(ctx);
         }
+        if ctx
+            .data_mut(|d| d.remove_temp::<bool>(weather_map::WeatherMap::request_id()))
+            .is_some()
+        {
+            self.open_weather(ctx);
+        }
         self.poll_fetch();
         self.poll_sky();
         self.poll_map();
+        self.weather.poll(ctx);
         if let Some(charts) = &mut self.charts {
             charts.poll();
         }
@@ -750,6 +828,7 @@ impl eframe::App for MeteoApp {
             .show_separator_line(false)
             .show(ui, Self::footer);
 
+        let has_tray = self.has_tray();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::BG))
             .show(ui, |ui| {
@@ -766,18 +845,22 @@ impl eframe::App for MeteoApp {
                                 if let Some(err) = &self.error {
                                     error_banner(ui, err);
                                 }
-                                dashboard(ui, data, &self.map, self.has_tray());
+                                dashboard(ui, data, &self.map, &mut self.weather, has_tray);
                             });
                     });
             });
 
         self.show_charts(ui.ctx());
+        self.show_weather(ui.ctx());
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(ALERTS_KEY, self.alerts.settings());
         if let Some(placement) = self.charts_placement {
             storage.set_string(CHARTS_PLACEMENT_KEY, placement.to_text());
+        }
+        if let Some(placement) = self.weather_placement {
+            storage.set_string(WEATHER_PLACEMENT_KEY, placement.to_text());
         }
     }
 }
@@ -795,11 +878,7 @@ impl MeteoApp {
                 ctx.send_viewport_cmd_to(ChartsWindow::viewport_id(), ViewportCommand::Focus)
             }
             None => {
-                let mut charts = ChartsWindow::new(
-                    self.charts_placement,
-                    ctx.input(|i| i.viewport().monitor_size),
-                    ctx.pixels_per_point(),
-                );
+                let mut charts = ChartsWindow::new(self.charts_placement, ctx);
                 charts.load(ctx);
                 self.charts = Some(charts);
             }
@@ -808,43 +887,49 @@ impl MeteoApp {
 
     fn show_charts(&mut self, ctx: &egui::Context) {
         let Some(charts) = &self.charts else { return };
-        let mut builder = egui::ViewportBuilder::default()
-            .with_title("MeteoCraft – Last 24 hours")
-            .with_inner_size(charts.size)
-            .with_min_inner_size([480.0, 400.0]);
-        if let Some(position) = charts.position {
-            builder = builder.with_position(position);
-        }
-        let (close, placement) =
-            ctx.show_viewport_immediate(ChartsWindow::viewport_id(), builder, |ui, _| {
-                egui::CentralPanel::default()
-                    .frame(
-                        egui::Frame::new()
-                            .fill(theme::BG)
-                            .inner_margin(Margin::symmetric(24, 18)),
-                    )
-                    .show(ui, |ui| charts.ui(ui));
-                ui.input(|i| {
-                    let viewport = i.viewport();
-                    // A minimized or maximized window has no position worth reopening at.
-                    let normal =
-                        viewport.minimized != Some(true) && viewport.maximized != Some(true);
-                    let placement = viewport
-                        .outer_rect
-                        .zip(viewport.inner_rect)
-                        .filter(|_| normal)
-                        .map(|(outer, inner)| Placement {
-                            position: outer.min,
-                            size: inner.size(),
-                        });
-                    (viewport.close_requested(), placement)
-                })
-            });
+        let (close, placement) = charts.opening.show(
+            ctx,
+            ChartsWindow::viewport_id(),
+            "MeteoCraft – Last 24 hours",
+            Vec2::new(480.0, 400.0),
+            |ui| charts.ui(ui),
+        );
         if placement.is_some() {
             self.charts_placement = placement;
         }
         if close {
             self.charts = None;
+        }
+    }
+
+    fn weather_viewport_id() -> egui::ViewportId {
+        egui::ViewportId::from_hash_of("weather-map")
+    }
+
+    fn open_weather(&mut self, ctx: &egui::Context) {
+        if self.weather_window.is_some() {
+            ctx.send_viewport_cmd_to(Self::weather_viewport_id(), ViewportCommand::Focus);
+            return;
+        }
+        self.weather_window = Some(Opening::new(self.weather_placement, WEATHER_WINDOW_SIZE, ctx));
+        self.weather.rewind();
+    }
+
+    fn show_weather(&mut self, ctx: &egui::Context) {
+        let Some(opening) = self.weather_window else { return };
+        let weather = &mut self.weather;
+        let (close, placement) = opening.show(
+            ctx,
+            Self::weather_viewport_id(),
+            "MeteoCraft – Clouds and radar",
+            Vec2::new(560.0, 420.0),
+            |ui| weather.window(ui),
+        );
+        if placement.is_some() {
+            self.weather_placement = placement;
+        }
+        if close {
+            self.weather_window = None;
         }
     }
 }
@@ -891,7 +976,13 @@ fn error_banner(ui: &mut egui::Ui, err: &str) {
     ui.add_space(12.0);
 }
 
-fn dashboard(ui: &mut egui::Ui, data: &StationData, map: &Map, has_tray: bool) {
+fn dashboard(
+    ui: &mut egui::Ui,
+    data: &StationData,
+    map: &Map,
+    weather: &mut weather_map::WeatherMap,
+    has_tray: bool,
+) {
     widgets::card_rows(
         ui,
         "overview",
@@ -913,12 +1004,16 @@ fn dashboard(ui: &mut egui::Ui, data: &StationData, map: &Map, has_tray: bool) {
     widgets::card_rows(ui, "daily", 0.0, vec![Box::new(|ui| daily_stats(ui, data))]);
     widgets::card_rows(ui, "records", 0.0, vec![Box::new(|ui| records(ui, data))]);
 
-    let images: Vec<CardFn> = vec![
+    let maps: Vec<CardFn> = vec![
         Box::new(move |ui| map_card(ui, map, has_tray)),
+        Box::new(|ui| weather.card(ui)),
+    ];
+    widgets::card_rows(ui, "maps", 300.0, maps);
+    let graphs: Vec<CardFn> = vec![
         Box::new(|ui| image_card(ui, "📈", "Temperature and wind chill", "graf.png")),
         Box::new(|ui| image_card(ui, "📉", "Air pressure", "graf_tlak.png")),
     ];
-    widgets::card_rows(ui, "images", 300.0, images);
+    widgets::card_rows(ui, "graphs", 300.0, graphs);
 }
 
 fn now_card(ui: &mut egui::Ui, data: &StationData) {

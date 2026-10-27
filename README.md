@@ -35,6 +35,11 @@ measurements from the HTML and shows them in a native window. It updates itself 
   on every chart. The station publishes this history only as graph images, so the app
   reads the values out of them. The window reopens where you last left it, at the same
   size
+- **Clouds and radar:** satellite clouds and radar rain over Slovenia and its neighbors,
+  on a dark map with Koseze marked. The card shows the newest picture; click it to play
+  the last hour as a loop in a window of its own, with play and pause, a slider to pick a
+  time, switches for each layer and a legend of the rain colors. Times are Ljubljana
+  time. Like the charts window, it reopens where you last left it
 - **Alerts (Windows):** a notification when frost, wind, rain or falling pressure begins.
   Choose which ones under **Alerts** in the header, and send a test notification from the
   same menu. Click a notification to open the window. See [Alerts](#alerts) for the rules
@@ -120,8 +125,8 @@ come only while MeteoCraft is running, including when only the taskbar widget is
 
 ### Settings
 
-Which alerts are on, the position of the windows and the charts window's size are saved
-in `%APPDATA%\MeteoCraft\data\app.ron`.
+Which alerts are on, and the position and size of the windows, are saved in
+`%APPDATA%\MeteoCraft\data\app.ron`.
 
 ## Testing
 
@@ -160,6 +165,9 @@ apps/
     dark_mode.rs  Reads the taskbar theme and applies it to the menus
     tooltip.rs    The hover tooltip, drawn by the app to match the theme
     widget.rs     The weather symbol and temperature embedded in the taskbar
+  weather_map.rs  The clouds and radar card and its window with the last hour's loop
+  weather_map/
+    download.rs   Downloads the satellite, radar and map pictures onto one grid
   widgets.rs   Cards, responsive card rows, status badge, compass and temperature bar
 tests/
   fixtures/
@@ -189,6 +197,20 @@ tests/
 - Otherwise the map is built once from [OpenStreetMap](https://www.openstreetmap.org/copyright)
   tiles and kept in the system's temp folder for 30 days, as the
   [tile usage policy](https://operations.osmfoundation.org/policies/tiles/) asks.
+- The clouds and radar pictures are downloaded only while they are on screen (the main
+  window or the loop's window), at most every 10 minutes, and only the pictures that are
+  new since the last time. All three layers share one Web Mercator grid covering about
+  11.7–17.3° E and 45.1–47.0° N:
+  - Rain comes from [RainViewer](https://www.rainviewer.com/api.html), which combines
+    the European weather radars: three 512-pixel tiles per picture, in its "Universal
+    Blue" colors, the only ones its free API offers.
+  - Clouds come from the GeoColour pictures of the Meteosat Third Generation satellite,
+    through [EUMETSAT's map service](https://view.eumetsat.int/). The app keeps only
+    the white and grey clouds as a soft white layer, so the land, sea and rain stay
+    visible under them. The satellite publishes about 20 minutes later than the radar,
+    so the newest radar pictures are shown over its latest clouds.
+  - The map under them is OpenStreetMap, darkened like the Koseze map and cached the
+    same way.
 - `sky::fetch()` reads the cloud cover and weather phenomenon (e.g. `overcast_lightRA`)
   from ARSO's [observation feed](https://meteo.arso.gov.si/uploads/meteo/help/sl/xml_service.html),
   at most every 10 minutes as ARSO publishes it, and uses the sunrise and sunset in the
@@ -215,7 +237,8 @@ The current weather comes from the Slovenian Environment Agency
 ([ARSO](https://meteo.arso.gov.si/)). The Google map is © Google and used under the
 [Google Maps Platform terms](https://cloud.google.com/maps-platform/terms). OpenStreetMap
 map data is © OpenStreetMap contributors, available under the
-[Open Database License](https://www.openstreetmap.org/copyright).
+[Open Database License](https://www.openstreetmap.org/copyright). The satellite pictures
+are © EUMETSAT, and the radar pictures come from [RainViewer](https://www.rainviewer.com/).
 
 ## License
 
