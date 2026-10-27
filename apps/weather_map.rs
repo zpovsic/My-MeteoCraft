@@ -13,7 +13,7 @@ use eframe::egui::{
 
 use crate::theme;
 use crate::widgets::{card_title, map_marker, muted};
-use download::{Frame, Update};
+use download::{Frame, Nearest, Update};
 
 /// Both sources publish a picture every 10 minutes.
 const PERIOD: Duration = Duration::from_secs(600);
@@ -24,6 +24,12 @@ const FRAMES: usize = 7;
 const FRAME_TIME: Duration = Duration::from_millis(500);
 /// The newest picture stays a little longer before the loop starts over.
 const LAST_FRAME_TIME: Duration = Duration::from_millis(1500);
+/// A newest radar picture older than this means the downloads aren't getting through.
+const STALE: i64 = 40 * 60;
+/// Closer than this, the rain is over Koseze as far as the radar can tell.
+const OVERHEAD_KM: f32 = 3.0;
+/// How much the distance to the rain must change in half an hour to call it a trend.
+const TREND_KM: f32 = 3.0;
 const ATTRIBUTION: &str =
     "Clouds © EUMETSAT · radar RainViewer · map © OpenStreetMap contributors";
 /// RainViewer's colors for rain, from drizzle to hail, by radar reflectivity in dBZ.
@@ -49,6 +55,8 @@ pub struct WeatherMap {
     /// The frames of the loop, oldest first.
     frames: Vec<Frame>,
     radar: HashMap<i64, TextureHandle>,
+    /// The nearest rain on each radar picture, if it is in range.
+    rain: HashMap<i64, Option<Nearest>>,
     clouds: HashMap<i64, TextureHandle>,
     pending: Option<Receiver<Update>>,
     fetched: Option<Instant>,
@@ -67,6 +75,7 @@ impl WeatherMap {
             map: None,
             frames: Vec::new(),
             radar: HashMap::new(),
+            rain: HashMap::new(),
             clouds: HashMap::new(),
             pending: None,
             fetched: None,
@@ -91,8 +100,16 @@ impl WeatherMap {
         self.since = Instant::now();
     }
 
-    /// Downloads what's new, when due. Called only while the pictures are on screen.
-    fn refresh_if_due(&mut self, ctx: &egui::Context) {
+    /// Fetch again with the next poll, e.g. after the user presses Refresh.
+    pub fn request_refresh(&mut self) {
+        if self.pending.is_none() {
+            self.fetched = None;
+        }
+    }
+
+    /// Downloads what's new, when due. Also called while only the taskbar widget is showing,
+    /// so approaching rain can still notify.
+    pub fn refresh_if_due(&mut self, ctx: &egui::Context) {
         let wait = if self.problem.is_some() { RETRY } else { PERIOD };
         let due = self.fetched.is_none_or(|at| at.elapsed() >= wait);
         if self.pending.is_some() || !due {
@@ -127,9 +144,10 @@ impl WeatherMap {
         if let Some(map) = update.map {
             self.map = Some(ctx.load_texture("weather-map", map, SMOOTH));
         }
-        for (time, image) in update.radar {
+        for (time, image, nearest) in update.radar {
             let texture = ctx.load_texture(format!("radar-{time}"), image, SMOOTH);
             self.radar.insert(time, texture);
+            self.rain.insert(time, nearest);
         }
         for (time, image) in update.clouds {
             let texture = ctx.load_texture(format!("clouds-{time}"), image, SMOOTH);
@@ -140,6 +158,7 @@ impl WeatherMap {
             self.frames = update.frames;
             let frames = &self.frames;
             self.radar.retain(|time, _| frames.iter().any(|f| f.radar == *time));
+            self.rain.retain(|time, _| frames.iter().any(|f| f.radar == *time));
             self.clouds.retain(|time, _| frames.iter().any(|f| f.clouds == *time));
         }
     }
@@ -168,6 +187,50 @@ impl WeatherMap {
             parts.push(format!("clouds {}", download::ljubljana_clock(frame.clouds)));
         }
         parts.join(" · ")
+    }
+
+    /// Where the rain is from Koseze on the newest picture, for the approaching-rain alert.
+    pub fn nearby_rain(&self) -> Option<crate::alerts::Nearby> {
+        let frames = self.shown();
+        let index = frames.len().checked_sub(1)?;
+        let nearest = (*self.rain.get(&frames[index].radar)?)?;
+        let before = (index.checked_sub(3))
+            .and_then(|before| self.rain.get(&frames[before].radar).copied().flatten());
+        Some(crate::alerts::Nearby {
+            km: nearest.km,
+            from: download::compass_name(nearest.bearing),
+            closer: before.is_some_and(|before| nearest.km < before.km - TREND_KM),
+            overhead: nearest.km < OVERHEAD_KM,
+        })
+    }
+
+    /// Where the rain is from Koseze on `frames[index]`, and whether it has come closer
+    /// over the half hour before.
+    fn rain_near_koseze(&self, frames: &[Frame], index: usize) -> Option<String> {
+        let Some(nearest) = *self.rain.get(&frames.get(index)?.radar)? else {
+            return Some(format!(
+                "No rain or snow within {:.0} km",
+                download::RAIN_RANGE_KM
+            ));
+        };
+        if nearest.km < OVERHEAD_KM {
+            return Some("Rain or snow over Koseze".to_owned());
+        }
+        let mut text = format!(
+            "Rain or snow {:.0} km to the {}",
+            nearest.km,
+            download::compass_name(nearest.bearing)
+        );
+        let before = (index.checked_sub(3))
+            .and_then(|before| self.rain.get(&frames[before].radar).copied().flatten());
+        if let Some(before) = before {
+            if nearest.km < before.km - TREND_KM {
+                text.push_str(", getting closer");
+            } else if nearest.km > before.km + TREND_KM {
+                text.push_str(", moving away");
+            }
+        }
+        Some(text)
     }
 
     /// Draws one frame's layers over the map, and Koseze, filling `rect`.
@@ -206,9 +269,12 @@ impl WeatherMap {
         let width = ui.available_width();
         let size = Vec2::new(width, width * download::SIZE[1] as f32 / download::SIZE[0] as f32);
         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-        let latest = self.shown().last().copied();
+        let frames = self.shown();
+        let latest = frames.last().copied();
         self.paint(ui, rect, latest, 10);
-        if self.map.is_none() && latest.is_none() && self.pending.is_some() {
+        if let Some(frame) = latest {
+            time_badge(ui, rect, &download::ljubljana_clock(frame.radar));
+        } else if self.map.is_none() && self.pending.is_some() {
             ui.put(rect, egui::Spinner::new());
         }
         if response
@@ -219,12 +285,20 @@ impl WeatherMap {
             ui.ctx().data_mut(|d| d.insert_temp(Self::request_id(), true));
             ui.ctx().request_repaint();
         }
+        if let Some(rain) = self.rain_near_koseze(&frames, frames.len().saturating_sub(1)) {
+            ui.label(RichText::new(format!("☔  {rain}")).color(theme::TEXT));
+        }
         let status = match (latest, &self.problem) {
             (Some(frame), _) => self.describe(frame),
             (None, Some(problem)) => format!("⚠ {problem}"),
             (None, None) => "Loading the satellite and radar pictures…".to_owned(),
         };
-        ui.label(muted(status).size(12.5));
+        let stale = latest.is_some_and(|frame| now() - frame.radar > STALE);
+        if stale {
+            ui.label(RichText::new(format!("⚠ Newest pictures: {status}")).color(theme::BAD).size(12.5));
+        } else {
+            ui.label(muted(status).size(12.5));
+        }
         ui.label(muted(ATTRIBUTION).size(11.0));
     }
 
@@ -233,6 +307,7 @@ impl WeatherMap {
         self.refresh_if_due(ui.ctx());
         let frames = self.shown();
         self.index = self.index.min(frames.len().saturating_sub(1));
+        self.handle_keys(ui, frames.len());
         self.advance(ui.ctx(), frames.len());
         let frame = frames.get(self.index).copied();
 
@@ -263,12 +338,20 @@ impl WeatherMap {
         let width = free.x.min(free.y * aspect).max(120.0);
         let size = Vec2::new(width, width / aspect);
         ui.vertical_centered(|ui| {
-            let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+            let (rect, response) = ui.allocate_exact_size(size, Sense::click());
             self.paint(ui, rect, frame, 12);
             if let Some(frame) = frame {
                 time_badge(ui, rect, &download::ljubljana_clock(frame.radar));
             } else if self.pending.is_some() {
                 ui.put(rect, egui::Spinner::new().size(32.0));
+            }
+            if frames.len() > 1
+                && response
+                    .on_hover_text("Click to play or pause")
+                    .clicked()
+            {
+                self.playing = !self.playing;
+                self.since = Instant::now();
             }
         });
         ui.add_space(8.0);
@@ -276,7 +359,10 @@ impl WeatherMap {
         ui.horizontal(|ui| {
             let label = if self.playing { "⏸  Pause" } else { "▶  Play" };
             let button = egui::Button::new(RichText::new(label).strong());
-            if ui.add_enabled(frames.len() > 1, button).clicked() {
+            let button = ui
+                .add_enabled(frames.len() > 1, button)
+                .on_hover_text("Space plays and pauses, the arrow keys step through the hour");
+            if button.clicked() {
                 self.playing = !self.playing;
                 self.since = Instant::now();
             }
@@ -296,9 +382,43 @@ impl WeatherMap {
             });
         });
         ui.add_space(4.0);
-        rain_legend(ui);
+        ui.horizontal(|ui| {
+            rain_legend(ui);
+            if let Some(rain) = self.rain_near_koseze(&frames, self.index) {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(format!("☔  {rain}")).color(theme::TEXT));
+                });
+            }
+        });
         ui.add_space(2.0);
         ui.label(muted(ATTRIBUTION).size(11.0));
+    }
+
+    /// Space plays and pauses; the arrow keys step back and forth, pausing the loop.
+    fn handle_keys(&mut self, ui: &egui::Ui, count: usize) {
+        // A focused control, such as a checkbox, uses the keys itself.
+        if count < 2 || ui.memory(|m| m.focused().is_some()) {
+            return;
+        }
+        let (space, left, right) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::Space),
+                i.key_pressed(egui::Key::ArrowLeft),
+                i.key_pressed(egui::Key::ArrowRight),
+            )
+        });
+        if space {
+            self.playing = !self.playing;
+            self.since = Instant::now();
+        }
+        if left || right {
+            self.playing = false;
+            self.index = if left {
+                (self.index + count - 1) % count
+            } else {
+                (self.index + 1) % count
+            };
+        }
     }
 
     fn advance(&mut self, ctx: &egui::Context, count: usize) {
@@ -321,6 +441,12 @@ impl WeatherMap {
             ctx.request_repaint_after(hold(self.index) - elapsed);
         }
     }
+}
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() as i64)
 }
 
 /// The time of the picture in a corner of the map.

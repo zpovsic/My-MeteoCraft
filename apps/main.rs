@@ -442,6 +442,7 @@ impl MeteoApp {
     }
 
     fn refresh(&mut self) {
+        self.weather.request_refresh();
         if self.pending.is_some() {
             return;
         }
@@ -732,7 +733,7 @@ impl MeteoApp {
                 }
             });
         response.0.on_hover_text(
-            "Windows notifications for frost, wind, rain and falling pressure at Koseze",
+            "Windows notifications for frost, wind, rain, approaching rain and falling pressure at Koseze",
         );
     }
 
@@ -798,7 +799,11 @@ impl eframe::App for MeteoApp {
         self.poll_fetch();
         self.poll_sky();
         self.poll_map();
+        self.weather.refresh_if_due(ctx);
         self.weather.poll(ctx);
+        if let Some(alert) = self.alerts.check_radar(self.weather.nearby_rain()) {
+            self.notify(&alert.title, &alert.body);
+        }
         if let Some(charts) = &mut self.charts {
             charts.poll();
         }

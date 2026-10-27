@@ -36,11 +36,14 @@ measurements from the HTML and shows them in a native window. It updates itself 
   reads the values out of them. The window reopens where you last left it, at the same
   size
 - **Clouds and radar:** satellite clouds and radar rain over Slovenia and its neighbors,
-  on a dark map with Koseze marked. The card shows the newest picture; click it to play
-  the last hour as a loop in a window of its own, with play and pause, a slider to pick a
-  time, switches for each layer and a legend of the rain colors. Times are Ljubljana
-  time. Like the charts window, it reopens where you last left it
-- **Alerts (Windows):** a notification when frost, wind, rain or falling pressure begins.
+  on a dark map with Koseze marked. The card shows the newest picture and how far the
+  rain is from Koseze; click it to play the last hour as a loop in a window of its own,
+  with play and pause (click the map, the button, or Space), a slider to pick a time,
+  switches for each layer and a legend of the rain colors. After sunset the clouds come
+  from Meteosat's infrared picture, because the daylight satellite view turns into city
+  lights. Times are Ljubljana time. Like the charts window, it reopens where you last
+  left it
+- **Alerts (Windows):** a notification when frost, wind, rain, approaching rain or falling pressure begins.
   Choose which ones under **Alerts** in the header, and send a test notification from the
   same menu. Click a notification to open the window. See [Alerts](#alerts) for the rules
 - Automatic refresh every 5 minutes, with a status badge (Live, Updating or Offline),
@@ -117,9 +120,11 @@ MeteoCraft checks each new measurement and notifies you when:
 | Frost | the temperature drops to 0 °C or below | it is back to 1 °C or above |
 | Wind | the wind reaches 29 km/h, a fresh breeze | it is below 20 km/h |
 | Rain | any rain falls in the last hour | an hour passes without rain |
+| Rain nearby | rain or snow on the radar comes within 40 km and is getting closer | it is more than 55 km away |
 | Falling pressure | the pressure falls 3 hPa or more within 3 hours | the fall is under 1.5 hPa |
 
-The station reports only the average wind, not gusts. The first measurement after the
+The station reports only the average wind, not gusts. Rain nearby uses the radar
+pictures, so it can warn before the station records any rain. The first look after the
 app starts is never an alert, so conditions that already hold don't notify you. Alerts
 come only while MeteoCraft is running, including when only the taskbar widget is showing.
 
@@ -197,18 +202,20 @@ tests/
 - Otherwise the map is built once from [OpenStreetMap](https://www.openstreetmap.org/copyright)
   tiles and kept in the system's temp folder for 30 days, as the
   [tile usage policy](https://operations.osmfoundation.org/policies/tiles/) asks.
-- The clouds and radar pictures are downloaded only while they are on screen (the main
-  window or the loop's window), at most every 10 minutes, and only the pictures that are
-  new since the last time. All three layers share one Web Mercator grid covering about
-  11.7–17.3° E and 45.1–47.0° N:
+- The clouds and radar pictures are downloaded at most every 10 minutes, including while
+  only the taskbar widget is showing, and only the pictures that are new since the last
+  time. All three layers share one Web Mercator grid covering about 11.7–17.3° E and
+  45.1–47.0° N:
   - Rain comes from [RainViewer](https://www.rainviewer.com/api.html), which combines
     the European weather radars: three 512-pixel tiles per picture, in its "Universal
-    Blue" colors, the only ones its free API offers.
+    Blue" colors, the only ones its free API offers. The app finds the nearest rain to
+    Koseze on each picture, shows how far it is, and can notify when it is approaching.
   - Clouds come from the GeoColour pictures of the Meteosat Third Generation satellite,
     through [EUMETSAT's map service](https://view.eumetsat.int/). The app keeps only
     the white and grey clouds as a soft white layer, so the land, sea and rain stay
-    visible under them. The satellite publishes about 20 minutes later than the radar,
-    so the newest radar pictures are shown over its latest clouds.
+    visible under them. After sunset GeoColour is NASA's city lights, so the app uses
+    Meteosat's 10.8 µm infrared picture instead. The satellite publishes about 20 minutes
+    later than the radar, so the newest radar pictures are shown over its latest clouds.
   - The map under them is OpenStreetMap, darkened like the Koseze map and cached the
     same way.
 - `sky::fetch()` reads the cloud cover and weather phenomenon (e.g. `overcast_lightRA`)

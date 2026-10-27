@@ -1,5 +1,5 @@
-//! Weather alerts: frost, wind, rain and fast-falling pressure, checked against every
-//! new measurement. Each alert fires when its condition begins and not again until the
+//! Weather alerts: frost, wind, rain, rain approaching on the radar, and fast-falling
+//! pressure. Each alert fires when its condition begins and not again until the
 //! condition has clearly ended, so a reading hovering around a threshold stays quiet.
 
 use std::collections::VecDeque;
@@ -17,6 +17,9 @@ const WIND_CLEARED: f32 = 20.0;
 const PRESSURE_FALL: f32 = 3.0;
 const PRESSURE_FALL_CLEARED: f32 = 1.5;
 const PRESSURE_PERIOD: Duration = Duration::from_secs(3 * 3600);
+/// Close enough on the radar to be worth a warning, and far enough again to clear it.
+const NEARBY_KM: f32 = 40.0;
+const NEARBY_CLEARED_KM: f32 = 55.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -24,10 +27,17 @@ pub enum Kind {
     Wind,
     Rain,
     Pressure,
+    Nearby,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 4] = [Kind::Frost, Kind::Wind, Kind::Rain, Kind::Pressure];
+    pub const ALL: [Kind; 5] = [
+        Kind::Frost,
+        Kind::Wind,
+        Kind::Rain,
+        Kind::Pressure,
+        Kind::Nearby,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -35,6 +45,7 @@ impl Kind {
             Kind::Wind => "Wind",
             Kind::Rain => "Rain",
             Kind::Pressure => "Falling pressure",
+            Kind::Nearby => "Rain nearby",
         }
     }
 
@@ -47,6 +58,9 @@ impl Kind {
                 "The pressure falls {PRESSURE_FALL:.0} hPa or more within {} hours",
                 PRESSURE_PERIOD.as_secs() / 3600
             ),
+            Kind::Nearby => format!(
+                "Rain or snow on the radar comes within {NEARBY_KM:.0} km and is getting closer"
+            ),
         }
     }
 
@@ -57,8 +71,18 @@ impl Kind {
             Kind::Wind => "wind",
             Kind::Rain => "rain",
             Kind::Pressure => "pressure",
+            Kind::Nearby => "nearby",
         }
     }
+}
+
+/// Rain on the radar, relative to Koseze.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Nearby {
+    pub km: f32,
+    pub from: &'static str,
+    pub closer: bool,
+    pub overhead: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -97,6 +121,8 @@ pub struct Watch {
     /// Whether each condition held at the last measurement; `None` before the first,
     /// which only sets the baseline: conditions that already hold at startup are not news.
     active: Option<[bool; Kind::ALL.len()]>,
+    /// Whether rain on the radar was approaching last time; `None` before the first look.
+    radar_active: Option<bool>,
     pressure: VecDeque<(Instant, f32)>,
 }
 
@@ -104,25 +130,35 @@ impl Watch {
     /// `settings` is what `settings()` returned last time; without it every alert is on.
     pub fn new(settings: Option<&str>) -> Self {
         let enabled = match settings {
-            Some(settings) => {
-                Kind::ALL.map(|kind| settings.split(',').any(|key| key.trim() == kind.key()))
-            }
             None => [true; Kind::ALL.len()],
+            Some("") => [false; Kind::ALL.len()],
+            Some(settings) => Kind::ALL.map(|kind| {
+                if kind == Kind::Nearby {
+                    !settings.split(',').any(|key| key.trim() == "!nearby")
+                } else {
+                    settings.split(',').any(|key| key.trim() == kind.key())
+                }
+            }),
         };
         Self {
             enabled,
             active: None,
+            radar_active: None,
             pressure: VecDeque::new(),
         }
     }
 
     pub fn settings(&self) -> String {
-        Kind::ALL
+        let mut keys: Vec<&str> = Kind::ALL
             .into_iter()
             .filter(|&kind| self.is_enabled(kind))
             .map(Kind::key)
-            .collect::<Vec<_>>()
-            .join(",")
+            .collect();
+        // Older saves have no nearby key; missing means on, so we record the off state.
+        if !self.is_enabled(Kind::Nearby) {
+            keys.push("!nearby");
+        }
+        keys.join(",")
     }
 
     pub fn is_enabled(&self, kind: Kind) -> bool {
@@ -166,6 +202,7 @@ impl Watch {
                 Kind::Wind => rising(conditions.wind_kmh, WIND, WIND_CLEARED),
                 Kind::Rain => conditions.rain_last_hour.map_or(was, |mm| mm > 0.0),
                 Kind::Pressure => rising(fall, PRESSURE_FALL, PRESSURE_FALL_CLEARED),
+                Kind::Nearby => was,
             }
         });
         self.active = Some(active);
@@ -180,6 +217,32 @@ impl Watch {
             })
             .filter_map(|kind| alert(kind, conditions, fall))
             .collect()
+    }
+
+    /// The alert that starts when rain on the radar comes closer to Koseze.
+    pub fn check_radar(&mut self, nearby: Option<Nearby>) -> Option<Alert> {
+        let approaching = nearby.is_some_and(|n| !n.overhead && n.km < NEARBY_KM && n.closer);
+        let hold = nearby.is_some_and(|n| !n.overhead && n.km < NEARBY_CLEARED_KM);
+        let active = match self.radar_active {
+            Some(true) => hold,
+            _ => approaching,
+        };
+        let before = self.radar_active;
+        self.radar_active = Some(active);
+        if before != Some(false) || !active || !self.is_enabled(Kind::Nearby) {
+            return None;
+        }
+        let nearby = nearby?;
+        Some(Alert {
+            kind: Kind::Nearby,
+            title: "☔ Rain approaching Koseze".into(),
+            body: format!(
+                "Rain or snow {:.0} km to the {}{}.",
+                nearby.km,
+                nearby.from,
+                if nearby.closer { ", and getting closer" } else { "" }
+            ),
+        })
     }
 }
 
@@ -221,6 +284,7 @@ fn alert(kind: Kind, c: &Conditions, fall: Option<f32>) -> Option<Alert> {
                 c.pressure?
             ),
         ),
+        Kind::Nearby => return None,
     };
     Some(Alert { kind, title, body })
 }
@@ -368,11 +432,45 @@ mod tests {
     #[test]
     fn settings_round_trip() {
         let mut watch = Watch::new(None);
-        assert_eq!(watch.settings(), "frost,wind,rain,pressure");
+        assert_eq!(watch.settings(), "frost,wind,rain,pressure,nearby");
         watch.set_enabled(Kind::Wind, false);
-        assert_eq!(watch.settings(), "frost,rain,pressure");
+        assert_eq!(watch.settings(), "frost,rain,pressure,nearby");
         let restored = Watch::new(Some(&watch.settings()));
         assert_eq!(restored.enabled, watch.enabled);
-        assert_eq!(Watch::new(Some("")).settings(), "");
+        assert_eq!(Watch::new(Some("")).settings(), "!nearby");
+        assert!(Watch::new(Some("frost,wind,rain,pressure")).is_enabled(Kind::Nearby));
+        watch.set_enabled(Kind::Nearby, false);
+        assert_eq!(watch.settings(), "frost,rain,pressure,!nearby");
+        assert!(!Watch::new(Some(&watch.settings())).is_enabled(Kind::Nearby));
+    }
+
+    #[test]
+    fn nearby_rain_fires_when_it_comes_closer() {
+        let mut watch = Watch::new(None);
+        let approaching = Nearby {
+            km: 18.0,
+            from: "west",
+            closer: true,
+            overhead: false,
+        };
+        assert!(watch.check_radar(Some(approaching)).is_none());
+        watch.check_radar(None);
+        let alert = watch.check_radar(Some(approaching)).unwrap();
+        assert_eq!(alert.kind, Kind::Nearby);
+        assert_eq!(
+            alert.body,
+            "Rain or snow 18 km to the west, and getting closer."
+        );
+        assert!(watch.check_radar(Some(approaching)).is_none());
+        watch.check_radar(Some(Nearby {
+            km: 60.0,
+            from: "west",
+            closer: false,
+            overhead: false,
+        }));
+        assert_eq!(
+            watch.check_radar(Some(approaching)).unwrap().kind,
+            Kind::Nearby
+        );
     }
 }

@@ -19,7 +19,12 @@ const RADAR_STYLE: &str = "2/1_1";
 const RAINVIEWER_MAPS: &str = "https://api.rainviewer.com/public/weather-maps.json";
 const CLOUD_LAYER: &str = "mtg_fd:rgb_geocolour";
 const CLOUD_CAPABILITIES: &str = "https://view.eumetsat.int/geoserver/mtg_fd/rgb_geocolour/ows?service=WMS&version=1.3.0&request=GetCapabilities";
+/// GeoColour's night pictures are city lights; this infrared channel shows the clouds.
+const IR_LAYER: &str = "msg_fes:ir108";
+const IR_CAPABILITIES: &str = "https://view.eumetsat.int/geoserver/msg_fes/ir108/ows?service=WMS&version=1.3.0&request=GetCapabilities";
 const CLOUD_MAP: &str = "https://view.eumetsat.int/geoserver/ows";
+/// Meteosat's infrared pictures land on the quarter hour.
+const IR_STEP: i64 = 900;
 /// The satellite sees about 2 km per pixel here, so a finer image only shows the map
 /// service's blocky resampling; smoothed when drawn larger, half the pixels look better.
 const CLOUD_SIZE: [u32; 2] = [SIZE[0] / 2, SIZE[1] / 2];
@@ -34,11 +39,24 @@ pub struct Frame {
     pub clouds: i64,
 }
 
+/// Where the nearest rain or snow is from Koseze on a radar picture.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Nearest {
+    pub km: f32,
+    /// Degrees clockwise from north, from Koseze toward it.
+    pub bearing: f32,
+}
+
+/// The map reaches at least this far from Koseze in every direction.
+pub const RAIN_RANGE_KM: f32 = 100.0;
+/// Fainter radar pixels are the soft edges that RainViewer's smoothing adds.
+const RAIN_ALPHA: u8 = 128;
+
 pub struct Update {
     pub map: Option<ColorImage>,
     pub frames: Vec<Frame>,
-    /// Only the images that weren't loaded before.
-    pub radar: Vec<(i64, ColorImage)>,
+    /// Only the images that weren't loaded before, with the nearest rain on each, if any.
+    pub radar: Vec<(i64, ColorImage, Option<Nearest>)>,
     pub clouds: Vec<(i64, ColorImage)>,
     /// What went wrong with the parts that are missing.
     pub problem: Option<String>,
@@ -106,6 +124,9 @@ pub fn fetch(count: usize, have_map: bool, have_radar: &[i64], have_clouds: &[i6
             None
         }
     };
+    let latest_ir = get_text(IR_CAPABILITIES)
+        .ok()
+        .and_then(|xml| parse_latest_time(&xml));
 
     let recent = &radar_frames[radar_frames.len().saturating_sub(count)..];
     let times: Vec<i64> = match latest_clouds {
@@ -123,7 +144,7 @@ pub fn fetch(count: usize, have_map: bool, have_radar: &[i64], have_clouds: &[i6
             continue;
         }
         match download_radar(&host, path) {
-            Ok(image) => radar.push((*time, image)),
+            Ok(image) => radar.push((*time, map::color_image(&image), nearest_rain(&image))),
             Err(e) => note("radar", &e),
         }
     }
@@ -135,7 +156,7 @@ pub fn fetch(count: usize, have_map: bool, have_radar: &[i64], have_clouds: &[i6
             if have_clouds.contains(&time) {
                 continue;
             }
-            match download_clouds(time) {
+            match download_clouds(time, latest_ir) {
                 Ok(image) => clouds.push((time, image)),
                 Err(e) => note("clouds", &e),
             }
@@ -188,7 +209,7 @@ fn get_image(url: &str) -> Result<RgbaImage, BoxError> {
 }
 
 /// The radar image at `path`, put together from the row of tiles under the map.
-fn download_radar(host: &str, path: &str) -> Result<ColorImage, BoxError> {
+fn download_radar(host: &str, path: &str) -> Result<RgbaImage, BoxError> {
     let (left, top) = origin();
     let row = top / RADAR_TILE;
     let width = i64::from(SIZE[0]);
@@ -202,23 +223,94 @@ fn download_radar(host: &str, path: &str) -> Result<ColorImage, BoxError> {
         }
         image::imageops::replace(&mut radar, &tile, column * RADAR_TILE - left, 0);
     }
-    Ok(map::color_image(&radar))
+    Ok(radar)
 }
 
-fn download_clouds(time: i64) -> Result<ColorImage, BoxError> {
+/// The rain or snow closest to Koseze on a radar picture, unless it is out of range.
+fn nearest_rain(radar: &RgbaImage) -> Option<Nearest> {
+    let [x, y] = koseze();
+    let (koseze_x, koseze_y) = (x * radar.width() as f32, y * radar.height() as f32);
+    let mut nearest: Option<(f32, f32, f32)> = None;
+    for (x, y, pixel) in radar.enumerate_pixels() {
+        if pixel.0[3] < RAIN_ALPHA {
+            continue;
+        }
+        let (dx, dy) = (x as f32 + 0.5 - koseze_x, y as f32 + 0.5 - koseze_y);
+        let squared = dx * dx + dy * dy;
+        if nearest.is_none_or(|(closest, _, _)| squared < closest) {
+            nearest = Some((squared, dx, dy));
+        }
+    }
+    let (squared, dx, dy) = nearest?;
+    let km = squared.sqrt() * km_per_pixel();
+    (km <= RAIN_RANGE_KM).then(|| Nearest {
+        km,
+        bearing: dx.atan2(-dy).to_degrees().rem_euclid(360.0),
+    })
+}
+
+/// The ground distance one pixel of `ZOOM` spans at Koseze's latitude.
+fn km_per_pixel() -> f32 {
+    let world = f64::from(map::TILE) * f64::from(1_u32 << ZOOM);
+    (40_075.016_686 * map::CENTER.0.to_radians().cos() / world) as f32
+}
+
+/// "northwest" for a bearing of 315°.
+pub fn compass_name(bearing: f32) -> &'static str {
+    const NAMES: [&str; 8] = [
+        "north",
+        "northeast",
+        "east",
+        "southeast",
+        "south",
+        "southwest",
+        "west",
+        "northwest",
+    ];
+    NAMES[((bearing + 22.5).rem_euclid(360.0) / 45.0) as usize % 8]
+}
+
+fn download_clouds(time: i64, latest_ir: Option<i64>) -> Result<ColorImage, BoxError> {
+    let colour = get_map(CLOUD_LAYER, time)?;
+    let layer = if is_night_geocolour(&colour) {
+        // After sunset GeoColour is NASA's city lights; infrared still shows the clouds.
+        let ir_time = latest_ir.unwrap_or(time).min(time - time.rem_euclid(IR_STEP));
+        match get_map(IR_LAYER, ir_time) {
+            Ok(ir) => ir_cloud_layer(&ir),
+            Err(_) => night_cloud_layer(&colour),
+        }
+    } else {
+        cloud_layer(&colour)
+    };
+    // Rounds off the stair steps of the satellite's pixels.
+    Ok(map::color_image(&image::imageops::blur(&layer, 1.2)))
+}
+
+fn get_map(layer: &str, time: i64) -> Result<RgbaImage, BoxError> {
     let (left, top) = origin();
     let (west, north) = mercator_meters(left, top);
     let (east, south) = mercator_meters(left + i64::from(SIZE[0]), top + i64::from(SIZE[1]));
     let [width, height] = CLOUD_SIZE;
     let url = format!(
-        "{CLOUD_MAP}?service=WMS&version=1.3.0&request=GetMap&layers={CLOUD_LAYER}&styles=\
+        "{CLOUD_MAP}?service=WMS&version=1.3.0&request=GetMap&layers={layer}&styles=\
          &crs=EPSG:3857&bbox={west},{south},{east},{north}&width={width}&height={height}\
          &format=image/png&time={}",
         iso_time(time)
     );
-    let layer = cloud_layer(&get_image(&url)?);
-    // Rounds off the stair steps of the satellite's pixels.
-    Ok(map::color_image(&image::imageops::blur(&layer, 1.2)))
+    get_image(&url)
+}
+
+/// GeoColour's night composite is a dark Earth with yellow city lights; by day the
+/// land is mid-grey and green, with almost no near-black pixels.
+fn is_night_geocolour(image: &RgbaImage) -> bool {
+    let dark = image
+        .pixels()
+        .filter(|pixel| {
+            let [r, g, b, _] = pixel.0.map(f32::from);
+            0.299 * r + 0.587 * g + 0.114 * b < 0.12 * 255.0
+        })
+        .count();
+    dark as f32 / (image.width() * image.height()) as f32 > 0.08
 }
 
 /// Web Mercator coordinates in meters of a pixel on the world map at `ZOOM`.
@@ -262,6 +354,35 @@ fn cloud_layer(image: &RgbaImage) -> RgbaImage {
             shade.saturating_add(8),
             (density * a * 215.0).round() as u8,
         ];
+    }
+    layer
+}
+
+/// Infrared: the warmer ground is mid-grey, colder clouds are lighter.
+fn ir_cloud_layer(image: &RgbaImage) -> RgbaImage {
+    let mut layer = image.clone();
+    for pixel in layer.pixels_mut() {
+        let luma = 0.299 * f32::from(pixel.0[0]) + 0.587 * f32::from(pixel.0[1]) + 0.114 * f32::from(pixel.0[2]);
+        let density = smoothstep(0.40, 0.62, luma / 255.0);
+        let shade = (210.0 + 45.0 * (luma / 255.0)).round() as u8;
+        pixel.0 = [shade, shade, shade.saturating_add(8), (density * 220.0).round() as u8];
+    }
+    layer
+}
+
+/// Last resort at night: keep the pale veil of clouds, drop the yellow city lights.
+fn night_cloud_layer(image: &RgbaImage) -> RgbaImage {
+    let mut layer = image.clone();
+    for pixel in layer.pixels_mut() {
+        let [r, g, b, a] = pixel.0.map(|c| f32::from(c) / 255.0);
+        let luma = 0.299 * r + 0.587 * g + 0.114 * b;
+        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+        let saturation = if max > 0.0 { (max - min) / max } else { 0.0 };
+        let city = r > g && g > b && saturation > 0.28 && luma > 0.28;
+        let veil = !city && luma > 0.14 && (saturation < 0.35 || b >= r);
+        let density = if veil { smoothstep(0.14, 0.48, luma) } else { 0.0 };
+        let shade = (200.0 + 55.0 * luma).round() as u8;
+        pixel.0 = [shade, shade, shade.saturating_add(8), (density * a * 200.0).round() as u8];
     }
     layer
 }
@@ -447,6 +568,83 @@ mod tests {
         let alpha: Vec<u8> = layer.pixels().map(|p| p.0[3]).collect();
         assert!(alpha[0] > 200, "{alpha:?}");
         assert_eq!(alpha[1..], [0, 0]);
+    }
+
+    #[test]
+    fn night_geocolour_is_the_dark_city_lights() {
+        let mut night = RgbaImage::new(4, 1);
+        night.put_pixel(0, 0, image::Rgba([8, 8, 12, 255]));
+        night.put_pixel(1, 0, image::Rgba([6, 6, 10, 255]));
+        night.put_pixel(2, 0, image::Rgba([220, 180, 60, 255]));
+        night.put_pixel(3, 0, image::Rgba([10, 10, 14, 255]));
+        assert!(is_night_geocolour(&night));
+
+        let mut day = RgbaImage::new(4, 1);
+        day.put_pixel(0, 0, image::Rgba([235, 238, 240, 255]));
+        day.put_pixel(1, 0, image::Rgba([96, 84, 52, 255]));
+        day.put_pixel(2, 0, image::Rgba([16, 52, 70, 255]));
+        day.put_pixel(3, 0, image::Rgba([70, 110, 60, 255]));
+        assert!(!is_night_geocolour(&day));
+    }
+
+    #[test]
+    fn infrared_keeps_cold_cloud_and_clears_the_ground() {
+        let mut image = RgbaImage::new(2, 1);
+        image.put_pixel(0, 0, image::Rgba([90, 90, 90, 255]));
+        image.put_pixel(1, 0, image::Rgba([170, 170, 170, 255]));
+        let alpha: Vec<u8> = ir_cloud_layer(&image).pixels().map(|p| p.0[3]).collect();
+        assert!(alpha[0] < 30, "{alpha:?}");
+        assert!(alpha[1] > 160, "{alpha:?}");
+    }
+
+    #[test]
+    fn night_veil_drops_city_lights() {
+        let mut image = RgbaImage::new(2, 1);
+        image.put_pixel(0, 0, image::Rgba([80, 88, 96, 255]));
+        image.put_pixel(1, 0, image::Rgba([220, 180, 60, 255]));
+        let alpha: Vec<u8> = night_cloud_layer(&image).pixels().map(|p| p.0[3]).collect();
+        assert!(alpha[0] > 80, "{alpha:?}");
+        assert_eq!(alpha[1], 0);
+    }
+
+    #[test]
+    fn the_rain_range_fits_on_the_map() {
+        let [x, y] = koseze();
+        let [width, height] = SIZE.map(|side| side as f32);
+        let room = [x * width, (1.0 - x) * width, y * height, (1.0 - y) * height];
+        for pixels in room {
+            assert!(pixels * km_per_pixel() > RAIN_RANGE_KM, "{room:?}");
+        }
+    }
+
+    #[test]
+    fn finds_the_nearest_rain() {
+        let mut radar = RgbaImage::new(SIZE[0], SIZE[1]);
+        assert_eq!(nearest_rain(&radar), None);
+
+        let [x, y] = koseze();
+        let (x, y) = ((x * SIZE[0] as f32) as u32, (y * SIZE[1] as f32) as u32);
+        // A faint edge doesn't count; 20 pixels (8.5 km) west and 40 north do.
+        radar.put_pixel(x + 5, y, image::Rgba([0x88, 0xdd, 0xee, 60]));
+        radar.put_pixel(x - 20, y, image::Rgba([0x88, 0xdd, 0xee, 255]));
+        radar.put_pixel(x, y - 40, image::Rgba([0xff, 0xee, 0x00, 255]));
+        let nearest = nearest_rain(&radar).unwrap();
+        assert!((nearest.km - 8.5).abs() < 0.5, "{nearest:?}");
+        assert_eq!(compass_name(nearest.bearing), "west");
+
+        // Too far to be sure it isn't beyond the map's edge in another direction.
+        let mut radar = RgbaImage::new(SIZE[0], SIZE[1]);
+        radar.put_pixel(0, y, image::Rgba([0x88, 0xdd, 0xee, 255]));
+        assert_eq!(nearest_rain(&radar), None);
+    }
+
+    #[test]
+    fn names_compass_directions() {
+        assert_eq!(compass_name(0.0), "north");
+        assert_eq!(compass_name(350.0), "north");
+        assert_eq!(compass_name(100.0), "east");
+        assert_eq!(compass_name(225.0), "southwest");
+        assert_eq!(compass_name(315.0), "northwest");
     }
 
     #[test]
