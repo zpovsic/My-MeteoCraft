@@ -42,6 +42,7 @@ fn main() -> eframe::Result {
             .with_title("MeteoCraft – Ljubljana Koseze")
             .with_inner_size([1000.0, 750.0])
             .with_min_inner_size([460.0, 440.0]),
+        wgpu_options: wgpu_options(),
         ..Default::default()
     };
     eframe::run_native(
@@ -53,6 +54,26 @@ fn main() -> eframe::Result {
             Ok(Box::new(MeteoApp::new(cc.egui_ctx.clone(), cc.storage)))
         }),
     )
+}
+
+/// On Windows wgpu would otherwise pick Vulkan on NVIDIA cards, whose driver kept
+/// tens of GB of GPU memory committed to the process after a few hours.
+/// `WGPU_BACKEND` still overrides this.
+#[cfg(windows)]
+fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew, wgpu};
+    let mut setup = WgpuSetupCreateNew::without_display_handle();
+    setup.instance_descriptor.backends =
+        wgpu::Backends::from_env().unwrap_or(wgpu::Backends::DX12);
+    WgpuConfiguration {
+        wgpu_setup: WgpuSetup::CreateNew(setup),
+        ..Default::default()
+    }
+}
+
+#[cfg(not(windows))]
+fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+    Default::default()
 }
 
 struct MeteoApp {
